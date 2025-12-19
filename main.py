@@ -1,7 +1,8 @@
 import os
 import threading
 import time
-from tkinter import filedialog, messagebox
+import random
+import re
 import customtkinter as ctk
 from google import genai
 from dotenv import load_dotenv
@@ -31,6 +32,8 @@ class VideoAIApp(ctk.CTk):
 
         self.video_path = ""
         self.is_processing = False
+        self.stop_requested = False
+        self.target_count = 0
 
         # Khởi tạo UI
         self.setup_ui()
@@ -44,30 +47,66 @@ class VideoAIApp(ctk.CTk):
         self.input_frame = ctk.CTkFrame(self)
         self.input_frame.pack(pady=10, padx=40, fill="x")
 
-        self.topic_label = ctk.CTkLabel(self.input_frame, text="Chủ đề video (Tiếng Việt):")
-        self.topic_label.pack(pady=(10, 0), padx=20, anchor="w")
+        # Prompt input (thay cho topic)
+        self.prompt_label = ctk.CTkLabel(self.input_frame, text="Prompt (Tiếng Việt):")
+        self.prompt_label.pack(pady=(10, 0), padx=20, anchor="w")
 
-        self.topic_entry = ctk.CTkEntry(self.input_frame, placeholder_text="Ví dụ: Động lực làm giàu, bí quyết sống khỏe...", height=40)
-        self.topic_entry.pack(pady=(5, 15), padx=20, fill="x")
+        # Mặc định prompt giống nội dung cũ với topic='ngẫu nhiên'
+        default_prompt = (
+            "Hãy đóng vai một người cực kỳ nhiều chuyện, số nhọ, làm gì cũng hỏng và luôn gặp khó khăn trong cuộc sống. "
+            "Hãy viết một dòng trạng thái (status) than vãn, kể khổ về chủ đề: ngẫu nhiên. "
+            "Yêu cầu: Giọng văn phải đậm chất 'drama', hay than thân trách phận, kể lể những xui xẻo mình gặp phải và hỏi xin lời khuyên hoặc sự đồng cảm từ cộng đồng mạng. "
+            "Sử dụng ngôn ngữ đời thường, có chút hờn dỗi, dùng nhiều từ cảm thán (ôi trời, sao tôi khổ thế, mệt mỏi quá...), độ dài khoảng 40-90 chữ. "
+            "Chỉ trả về nội dung status bằng tiếng Việt, không thêm bất kỳ văn bản dẫn nhập nào khác."
+        )
 
-        # Video Selection
-        self.btn_select = ctk.CTkButton(self, text="Chọn Video Nền", command=self.select_video, fg_color="#3b3b3b", hover_color="#4a4a4a")
-        self.btn_select.pack(pady=10)
+        # lưu prompt mặc định lên instance để dùng được ở nơi khác
+        self.default_prompt = default_prompt
 
-        self.video_info_label = ctk.CTkLabel(self, text="Chưa chọn video nền", font=("Arial", 11), text_color="gray")
-        self.video_info_label.pack()
+        # Multiline prompt box so user can enter newlines; wrap by word (break at spaces)
+        self.prompt_entry = ctk.CTkTextbox(self.input_frame, height=120, wrap="word")
+        self.prompt_entry.insert("1.0", self.default_prompt)
+        self.prompt_entry.pack(pady=(5, 15), padx=20, fill="both")
 
-        # Action Button
+        # Chọn ngẫu nhiên video nền từ thư mục `input`
+        self.set_random_video()
+
+        # Action Buttons
+        btn_frame = ctk.CTkFrame(self)
+        btn_frame.pack(pady=(30, 6))
+
         self.btn_run = ctk.CTkButton(
-            self,
+            btn_frame,
             text="TẠO VIDEO TIKTOK",
             command=self.start_process,
             height=50,
-            width=300,
+            width=220,
             font=("Segoe UI", 16, "bold"),
             fg_color="#fe2c55"
         )
-        self.btn_run.pack(pady=(30, 10))
+        self.btn_run.grid(row=0, column=0, padx=(0, 10))
+
+        self.btn_stop = ctk.CTkButton(
+            btn_frame,
+            text="DỪNG TẠO VIDEO",
+            command=self.request_stop,
+            height=50,
+            width=140,
+            font=("Segoe UI", 12, "bold"),
+            fg_color="#6b6b6b"
+        )
+        self.btn_stop.grid(row=0, column=1)
+        self.btn_stop.configure(state="disabled")
+
+        # Number of videos input
+        qty_frame = ctk.CTkFrame(self)
+        qty_frame.pack(pady=(6, 0))
+
+        self.qty_label = ctk.CTkLabel(qty_frame, text="Số lượng video:")
+        self.qty_label.grid(row=0, column=0, padx=(0, 8))
+        self.qty_entry = ctk.CTkEntry(qty_frame, width=80, placeholder_text="1")
+        self.qty_entry.insert(0, "1")
+        self.qty_entry.grid(row=0, column=1)
 
         # Status & Progress
         self.status_label = ctk.CTkLabel(self, text="Trạng thái: Sẵn sàng", text_color="#aaaaaa")
@@ -77,11 +116,26 @@ class VideoAIApp(ctk.CTk):
         self.progress_bar.pack(pady=10)
         self.progress_bar.set(0)
 
-    def select_video(self):
-        path = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4 *.mov *.avi")])
-        if path:
-            self.video_path = path
-            self.video_info_label.configure(text=f"Đã chọn: {os.path.basename(path)}", text_color="#57bb8a")
+    def set_random_video(self):
+        """Tự động chọn ngẫu nhiên một video từ thư mục `input` (relative to script)."""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        input_dir = os.path.join(script_dir, "input")
+
+        exts = (".mp4", ".mov", ".avi", ".mkv")
+        candidates = []
+        if os.path.isdir(input_dir):
+            for fn in os.listdir(input_dir):
+                if fn.lower().endswith(exts):
+                    candidates.append(os.path.join(input_dir, fn))
+
+        if not candidates:
+            self.video_path = ""
+            # Thông báo lỗi qua status thay vì hiển thị tên file
+            self.update_status("Không tìm thấy video nền trong input/", 0)
+        else:
+            choice = random.choice(candidates)
+            self.video_path = choice
+            # Không hiển thị tên file video nền (yêu cầu: ẩn thông tin video nền)
 
     def update_status(self, text, progress=None):
         self.status_label.configure(text=f"Trạng thái: {text}")
@@ -133,83 +187,153 @@ class VideoAIApp(ctk.CTk):
     def start_process(self):
         """Hàm khởi chạy tiến trình xử lý."""
         if not GEMINI_API_KEY:
-            messagebox.showerror("Lỗi", "Không tìm thấy GEMINI_API_KEY trong file .env")
+            self.update_status("Lỗi: Không tìm thấy GEMINI_API_KEY trong file .env", 0)
             return
 
-        topic = self.topic_entry.get().strip()
-        if not topic or not self.video_path:
-            messagebox.showwarning("Thiếu dữ liệu", "Vui lòng nhập chủ đề và chọn video nền trước!")
+        # Read multiline prompt from textbox
+        try:
+            prompt_text = self.prompt_entry.get("1.0", "end").strip() or self.default_prompt
+        except Exception:
+            # fallback if widget API differs
+            prompt_text = getattr(self.prompt_entry, 'get', lambda *a: self.default_prompt)().strip() or self.default_prompt
+
+        if not self.video_path:
+            self.update_status("Thiếu dữ liệu: Vui lòng đảm bảo có video nền.", 0)
             return
 
         if self.is_processing:
             return
 
+        # Đọc số lượng video
+        try:
+            count = int(self.qty_entry.get())
+            if count < 1:
+                count = 1
+        except Exception:
+            count = 1
+
         self.is_processing = True
+        self.stop_requested = False
+        self.target_count = count
         self.btn_run.configure(state="disabled", text="ĐANG XỬ LÝ...")
+        # Chỉ cho phép dừng nếu có nhiều hơn 1 video sẽ tạo
+        if count > 1:
+            self.btn_stop.configure(state="normal")
+        else:
+            self.btn_stop.configure(state="disabled")
 
         # Chạy logic trong thread riêng để không treo giao diện
-        thread = threading.Thread(target=self.run_logic, args=(topic,))
+        thread = threading.Thread(target=self.run_logic, args=(prompt_text, count))
         thread.daemon = True
         thread.start()
 
-    def run_logic(self, topic):
+    def request_stop(self):
+        """Yêu cầu dừng quá trình tạo video tự động (dừng sau video hiện tại)."""
+        # Chỉ thực hiện nếu đang trong tiến trình tạo và đang tạo nhiều video
+        if not self.is_processing or self.target_count <= 1:
+            return
+
+        self.stop_requested = True
+        self.update_status("Yêu cầu dừng: sẽ dừng sau video hiện tại.")
+        self.btn_stop.configure(state="disabled")
+
+
+    def run_logic(self, prompt_text, count):
         try:
-            # Bước 1: Tạo nội dung
-            self.update_status("Đang sáng tạo nội dung AI...", 0.2)
-            prompt = (
-                f"Hãy đóng vai một bậc thầy triết học sâu sắc. Hãy viết một câu trích dẫn "
-                f"mang tính đạo lý, thức tỉnh hoặc truyền cảm hứng mạnh mẽ về chủ đề: {topic}. "
-                f"Yêu cầu: Câu văn phải thực tế, thấm thía, giàu hình ảnh, dễ hiểu, không sáo rỗng, độ dài khoảng 30-80 chữ. "
-                f"Chỉ trả về nội dung câu nói bằng tiếng Việt, không thêm bất kỳ văn bản nào khác."
-            )
+            created = 0
+            for i in range(count):
+                # Chọn lại video nền ngẫu nhiên cho mỗi lần tạo
+                self.set_random_video()
+                if not self.video_path:
+                    self.update_status("Không có video nền để tiếp tục.", 0)
+                    break
 
-            raw_content = self.generate_content_with_fallback(prompt)
-            content = self.split_text(raw_content, max_chars_per_line=22)
+                if self.stop_requested:
+                    break
 
-            # Bước 2: Xử lý video
-            self.update_status("Đang render video...", 0.5)
-            clip = VideoFileClip(self.video_path)
+                # Bước 1: Tạo nội dung
+                self.update_status(f"({i+1}/{count}) Đang sáng tạo nội dung AI...", 0.1)
+                # Nếu prompt chứa placeholder {topic}, thay bằng 'ngẫu nhiên'
+                prompt = prompt_text.replace("{topic}", "ngẫu nhiên")
+                raw_content = self.generate_content_with_fallback(prompt)
+                content = self.split_text(raw_content, max_chars_per_line=22)
 
-            duration = min(clip.duration, 10)
-            clip = clip.subclipped(0, duration)
+                # Bước 2: Xử lý video
+                self.update_status(f"({i+1}/{count}) Đang render video...", 0.5)
+                clip = VideoFileClip(self.video_path)
 
-            target_w = 720
-            target_h = 1280
+                duration = min(clip.duration, 10)
+                clip = clip.subclipped(0, duration)
 
-            background = ColorClip(size=(target_w, target_h), color=(0,0,0), duration=duration)
-            video_resized = clip.resized(width=int(target_w))
-            video_centered = video_resized.with_position(('center', 'center'))
+                target_w = 720
+                target_h = 1280
 
-            # Bước 3: Tạo Text Overlay
-            text_width = int(target_w * 0.85)
-            txt_clip = TextClip(
-                text=content,
-                font_size=50,
-                color='yellow',
-                font='font.ttf',
-                method='caption',
-                size=(text_width, None),
-                stroke_color='black',
-                stroke_width=2,
-                text_align='center'
-            ).with_duration(duration).with_position(('center', 'center'))
+                background = ColorClip(size=(target_w, target_h), color=(0,0,0), duration=duration)
+                video_resized = clip.resized(width=int(target_w))
+                video_centered = video_resized.with_position(('center', 'center'))
 
-            # Kết hợp
-            final_video = CompositeVideoClip([background, video_centered, txt_clip], size=(target_w, target_h))
+                # Bước 3: Tạo Text Overlay
+                text_width = int(target_w * 0.95)
+                txt_clip = TextClip(
+                    text=content,
+                    font_size=50,
+                    color='white',
+                    font='font.ttf',
+                    method='caption',
+                    size=(text_width, None),
+                    stroke_color='black',
+                    stroke_width=2,
+                    text_align='center'
+                ).with_duration(duration)
 
-            output_name = f"tiktok_{topic.replace(' ', '_')[:10]}.mp4"
-            final_video.write_videofile(output_name, fps=30, codec="libx264", audio_codec="aac")
+                # Đảm bảo dòng cuối không bị cắt: tính chiều cao text và đẩy lên vài px nếu cần
+                try:
+                    txt_h = txt_clip.h
+                    y = max(0, int((target_h - txt_h) / 2) - 10)
+                    txt_clip = txt_clip.with_position(('center', y))
+                except Exception:
+                    # Nếu không thể lấy chiều cao, fallback về center
+                    txt_clip = txt_clip.with_position(('center', 'center'))
 
-            self.update_status("Hoàn thành!", 1.0)
-            messagebox.showinfo("Thành công", f"Video đã sẵn sàng:\n{os.path.abspath(output_name)}")
+                # Kết hợp
+                final_video = CompositeVideoClip([background, video_centered, txt_clip], size=(target_w, target_h))
+
+                ts = time.strftime("%Y%m%d%H%M%S")
+                # Tạo tên an toàn từ prompt (nếu rỗng dùng 'prompt')
+                safe_topic = re.sub(r'[^A-Za-z0-9]', '_', prompt_text)[:10] or 'prompt'
+                output_name = f"tiktok_{safe_topic}_{ts}.mp4"
+                # Lưu vào thư mục output
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                output_dir = os.path.join(script_dir, "output")
+                os.makedirs(output_dir, exist_ok=True)
+                output_path = os.path.join(output_dir, output_name)
+
+                final_video.write_videofile(output_path, fps=30, codec="libx264", audio_codec="aac")
+
+                created += 1
+                self.update_status(f"({i+1}/{count}) Hoàn thành: {os.path.abspath(output_path)}", 1.0)
+
+                # Nếu có yêu cầu dừng thì ngưng, không chờ tiếp
+                if self.stop_requested:
+                    break
+
+                # Nếu chưa phải video cuối cùng thì chờ 30 giây (cho phép dừng trong thời gian chờ)
+                if i < count - 1:
+                    self.update_status(f"Đợi 30s trước khi tạo video tiếp ({i+1}/{count})...", 0)
+                    for _ in range(30):
+                        if self.stop_requested:
+                            break
+                        time.sleep(1)
 
         except Exception as e:
-            self.update_status("Lỗi hệ thống", 0)
-            messagebox.showerror("Lỗi", f"Chi tiết: {str(e)}")
+            self.update_status(f"Lỗi hệ thống: {str(e)}", 0)
 
         finally:
             self.is_processing = False
+            self.target_count = 0
+            self.stop_requested = False
             self.btn_run.configure(state="normal", text="TẠO VIDEO TIKTOK")
+            self.btn_stop.configure(state="disabled")
 
 if __name__ == "__main__":
     app = VideoAIApp()
