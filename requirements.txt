@@ -3,3 +3,6 @@ requests
 python-dotenv
 moviepy
 google-genai
+httpx==0.27.2
+tiktok-uploader
+browser-cookie3

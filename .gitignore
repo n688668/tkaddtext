@@ -4,3 +4,5 @@ videos/
 __pycache__/
 input/
 output/
+tiktok_env/
+cookies.txt
