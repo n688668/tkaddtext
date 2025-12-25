@@ -6,3 +6,7 @@ input/
 output/
 tiktok_env/
 cookies.txt
+pw_profile/
+dist/
+build/
+

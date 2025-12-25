@@ -12,12 +12,6 @@ from dotenv import load_dotenv
 # Cập nhật cách import cho MoviePy 2.0+
 from moviepy import VideoFileClip, TextClip, CompositeVideoClip, ColorClip
 
-# Thêm thư viện lấy cookie từ trình duyệt
-try:
-    import browser_cookie3
-except ImportError:
-    browser_cookie3 = None
-
 # 1. Nạp biến môi trường từ file .env
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -33,16 +27,47 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 class VideoAIApp(ctk.CTk):
+    def has_playwright_chromium(self):
+        browser_dir = os.path.join(
+            os.environ.get("LOCALAPPDATA"),
+            "ms-playwright"
+        )
+
+        if not os.path.isdir(browser_dir):
+            return False
+
+        for root, _, files in os.walk(browser_dir):
+            if "chrome.exe" in files:
+                return True
+
+        return False
+
+    def update_browser_ui_visibility(self):
+        has_browser = self.has_playwright_chromium()
+
+        if has_browser:
+            self.update_status("Sẵn sàng", 0)
+            self.progress_bar.pack_forget()
+            self.btn_cancel_download.pack_forget()
+        else:
+            self.progress_bar.pack(pady=10)
+            self.btn_cancel_download.pack(pady=5)
+            self.btn_cancel_download.configure(state="disabled")
+
     def __init__(self):
         super().__init__()
 
-        self.title("AI TikTok Video Creator Pro (Playwright Edition)")
-        self.geometry("750x850")
+        self.title("AI TikTok Video Generator")
+        self.geometry("750x650")
 
         self.video_path = ""
         self.is_processing = False
         self.stop_requested = False
         self.target_count = 0
+
+        self.chromium_user_cancelled = False
+        self.chromium_download_process = None
+        self.chromium_cancel_event = threading.Event()
 
         # Trạng thái thư viện (Kiểm tra động)
         self.has_playwright = self.check_playwright()
@@ -60,6 +85,117 @@ class VideoAIApp(ctk.CTk):
             print(f"'{sys.executable}' -m playwright install chromium")
             print("-" * 50)
 
+        self.update_browser_ui_visibility()
+
+    def cancel_chromium_download(self):
+        self.chromium_user_cancelled = True
+        self.chromium_cancel_event.set()
+
+        if self.chromium_download_process:
+            try:
+                self.chromium_download_process.terminate()
+            except:
+                pass
+
+        self.update_status(
+            "Bạn đã hủy tải trình duyệt.\nNhấn Upload lại nếu muốn tiếp tục.",
+            0
+        )
+        self.btn_cancel_download.configure(state="disabled")
+
+    def fake_download_progress(self, stop_event, cancel_event):
+        progress = 0.05
+        self.progress_bar.set(progress)
+
+        while not stop_event.is_set() and not cancel_event.is_set():
+            time.sleep(random.uniform(0.3, 0.7))
+            progress += random.uniform(0.02, 0.05)
+            progress = min(progress, 0.9)
+            self.progress_bar.set(progress)
+
+        if stop_event.is_set():
+            self.progress_bar.set(1.0)
+
+    def ensure_playwright_chromium(self, retries=2, timeout=600):
+        if self.chromium_user_cancelled:
+            self.update_status(
+                "Đã hủy tải trước đó.\nVui lòng bấm Upload lại để tiếp tục.",
+                0
+            )
+            return False
+
+        browser_dir = os.path.join(
+            os.environ.get("LOCALAPPDATA"),
+            "ms-playwright"
+        )
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = browser_dir
+
+        # ---- kiểm tra đã có chromium chưa ----
+        if os.path.isdir(browser_dir):
+            for root, _, files in os.walk(browser_dir):
+                if "chrome.exe" in files:
+                    return True
+
+        for attempt in range(1, retries + 1):
+            self.chromium_cancel_event.clear()
+            stop_event = threading.Event()
+
+            self.update_status(
+                f"Đang tải trình duyệt nền lần đầu (~150MB)\nQuá trình này chỉ diễn ra một lần.\nVui lòng không tắt ứng dụng.\n"
+                f"Lần thử {attempt}/{retries}",
+                0.05
+            )
+            self.btn_cancel_download.configure(state="normal")
+
+            # ---- download thread ----
+            def download():
+                try:
+                    self.chromium_download_process = subprocess.Popen(
+                        [sys.executable, "-m", "playwright", "install", "chromium"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                    self.chromium_download_process.wait()
+                finally:
+                    stop_event.set()
+
+            threading.Thread(target=download, daemon=True).start()
+            threading.Thread(
+                target=self.fake_download_progress,
+                args=(stop_event, self.chromium_cancel_event),
+                daemon=True
+            ).start()
+
+            # ---- timeout watchdog ----
+            start = time.time()
+            while not stop_event.is_set():
+                if self.chromium_cancel_event.is_set():
+                    return False
+                if time.time() - start > timeout:
+                    try:
+                        self.chromium_download_process.terminate()
+                    except:
+                        pass
+                    self.update_status("Tải trình duyệt bị timeout.", 0)
+                    break
+                time.sleep(0.3)
+
+            self.btn_cancel_download.configure(state="disabled")
+
+            # ---- kiểm tra lại ----
+            if os.path.isdir(browser_dir):
+                for root, _, files in os.walk(browser_dir):
+                    if "chrome.exe" in files:
+                        self.update_status("Tải trình duyệt hoàn tất!", 1.0)
+                        self.update_browser_ui_visibility()
+                        return True
+
+            self.update_status("Tải thất bại. Đang thử lại...", 0)
+
+        self.update_status("Không thể tải trình duyệt. Vui lòng kiểm tra mạng.", 0)
+        return False
+
+
     def check_playwright(self):
         """Kiểm tra xem thư viện có tồn tại không bằng cách thử import trực tiếp"""
         try:
@@ -71,23 +207,24 @@ class VideoAIApp(ctk.CTk):
 
     def setup_ui(self):
         # Header
-        self.header_label = ctk.CTkLabel(self, text="TIKTOK VIDEO AI GENERATOR", font=("Segoe UI", 24, "bold"))
+        self.header_label = ctk.CTkLabel(self, text="AI TIKTOK VIDEO CREATOR", font=("Segoe UI", 24, "bold"))
         self.header_label.pack(pady=(20, 10))
 
-        # Hướng dẫn xử lý Playwright
         auth_info = (
-            "🚀 HỆ THỐNG TỰ ĐỘNG HÓA PLAYWRIGHT\n"
-            "• Ưu tiên dùng cookies.txt (nếu có).\n"
-            "• Nếu không có file, App sẽ tự lấy cookie từ trình duyệt (Chrome/Edge).\n"
-            "• Vui lòng đăng nhập TikTok trên trình duyệt trước."
+            "🔐 XÁC THỰC TÀI KHOẢN TIKTOK\n"
+            "• Ứng dụng sẽ yêu cầu đăng nhập TikTok trong lần sử dụng đầu tiên.\n"
+            "• Thông tin đăng nhập được lưu an toàn trên máy của bạn.\n"
+            "• Các lần sau không cần đăng nhập lại.\n"
+            "• Không chia sẻ tài khoản cho bất kỳ bên thứ ba nào."
         )
+
         self.info_label = ctk.CTkLabel(self, text=auth_info, font=("Segoe UI", 11), text_color="#00ffcc", justify="center")
         self.info_label.pack(pady=5)
 
         # Hiển thị cảnh báo trực tiếp trên UI nếu thiếu thư viện
         self.lib_warning_label = ctk.CTkLabel(
             self,
-            text="⚠️ CẢNH BÁO: CHƯA CÀI ĐẶT THƯ VIỆN CẦN THIẾT\nNếu bạn vừa cài xong, hãy thử nhấn nút Tạo Video.",
+            text="⚠️ Ứng dụng chưa sẵn sàng để sử dụng.\nVui lòng khởi động lại hoặc liên hệ hỗ trợ.",
             font=("Segoe UI", 12, "bold"),
             text_color="#ff4d4d"
         )
@@ -128,7 +265,7 @@ class VideoAIApp(ctk.CTk):
         self.upload_var = ctk.BooleanVar(value=True)
         self.upload_checkbox = ctk.CTkCheckBox(
             self,
-            text="Tự động đăng lên TikTok (Playwright - Hiện trình duyệt)",
+            text="Tự động đăng video lên TikTok",
             variable=self.upload_var,
             font=("Segoe UI", 12)
         )
@@ -194,6 +331,17 @@ class VideoAIApp(ctk.CTk):
         self.progress_bar = ctk.CTkProgressBar(self, width=450)
         self.progress_bar.pack(pady=10)
         self.progress_bar.set(0)
+
+        self.btn_cancel_download = ctk.CTkButton(
+            self,
+            text="HỦY TẢI TRÌNH DUYỆT",
+            fg_color="#e74c3c",
+            hover_color="#c0392b",
+            command=self.cancel_chromium_download
+        )
+        self.btn_cancel_download.pack(pady=5)
+        self.btn_cancel_download.configure(state="disabled")
+
 
     def fix_libraries(self):
         """Tự động chạy lệnh cài đặt pip cho phiên bản Python hiện tại"""
@@ -272,138 +420,109 @@ class VideoAIApp(ctk.CTk):
             print("-" * 30)
         raise Exception("Không thể kết nối với Gemini API.")
 
-    def get_browser_cookies(self):
-        """Tự động lấy cookies TikTok từ trình duyệt đang mở"""
-        if not browser_cookie3:
-            print("Cảnh báo: Thư viện browser-cookie3 chưa được cài đặt.")
-            return None
+    # ===== PLAYWRIGHT PERSISTENT PROFILE =====
+    def get_pw_profile_dir(self):
+        if getattr(sys, 'frozen', False):
+            base = os.path.join(
+                os.environ.get("APPDATA"),
+                "TikTokVideoAI",
+                "pw_profile"
+            )
+        else:
+            base = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "pw_profile"
+            )
 
-        try:
-            print("Đang thử lấy cookies từ trình duyệt...")
-            # Thử lấy từ Chrome trước, nếu không có thử các trình duyệt khác
-            cj = None
-            try:
-                cj = browser_cookie3.chrome(domain_name='.tiktok.com')
-            except:
-                try:
-                    cj = browser_cookie3.load(domain_name='.tiktok.com')
-                except:
-                    pass
+        os.makedirs(base, exist_ok=True)
+        return base
 
-            if not cj:
-                return None
-
-            formatted_cookies = []
-            for cookie in cj:
-                formatted_cookies.append({
-                    'name': cookie.name,
-                    'value': cookie.value,
-                    'domain': cookie.domain,
-                    'path': cookie.path,
-                    'expires': cookie.expires,
-                    'httpOnly': False, # Mặc định
-                    'secure': cookie.secure,
-                    'sameSite': 'Lax'
-                })
-            print(f"Đã lấy thành công {len(formatted_cookies)} cookies từ trình duyệt.")
-            return formatted_cookies
-        except Exception as e:
-            print(f"Không thể tự động lấy cookies: {e}")
-            return None
 
     def upload_to_tiktok_playwright(self, video_path, description):
+        # ⭐ BẮT BUỘC: set path browser TRƯỚC khi import playwright
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(
+            os.environ.get("LOCALAPPDATA"),
+            "ms-playwright"
+        )
+
+        # ⭐ Đảm bảo Chromium tồn tại (tự tải nếu thiếu)
+        if not self.ensure_playwright_chromium():
+            self.update_status("Không thể tải Chromium.")
+            return False
+
         if not self.check_playwright():
-            print("LỖI: Thư viện Playwright chưa được cài đặt đúng cách.")
+            print("LỖI: Playwright chưa sẵn sàng.")
             return False
 
         from playwright.sync_api import sync_playwright
         import playwright_stealth
 
+        profile_dir = self.get_pw_profile_dir()
+
         try:
+
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=False)
-                context = browser.new_context(
+                # ⭐ Persistent Context: GIỮ COOKIE + LOGIN
+                context = p.chromium.launch_persistent_context(
+                    user_data_dir=profile_dir,
+                    headless=False,
                     viewport={'width': 1280, 'height': 800},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    args=[
+                        '--disable-blink-features=AutomationControlled',
+                        '--no-sandbox'
+                    ]
                 )
 
-                # Logic lấy cookie linh hoạt
-                loaded_cookies = None
+                page = context.pages[0] if context.pages else context.new_page()
+                page.set_default_timeout(120000)
 
-                # 1. Thử đọc từ file cookies.txt (Ưu tiên nhất)
-                if os.path.exists("cookies.txt"):
-                    try:
-                        with open("cookies.txt", "r", encoding="utf-8") as f:
-                            raw_cookies = json.load(f)
-                            loaded_cookies = []
-                            for c in raw_cookies:
-                                if 'sameSite' in c and c['sameSite']:
-                                    c['sameSite'] = str(c['sameSite']).capitalize()
-                                    if c['sameSite'] not in ["Strict", "Lax", "None"]:
-                                        c['sameSite'] = "Lax"
-                                loaded_cookies.append(c)
-                            print("Sử dụng cookies từ file cookies.txt")
-                    except Exception as e:
-                        print(f"Lỗi đọc file cookie: {e}")
-
-                # 2. Nếu không có file, thử lấy từ trình duyệt
-                if not loaded_cookies:
-                    loaded_cookies = self.get_browser_cookies()
-
-                # 3. Áp dụng cookies nếu tìm thấy
-                if loaded_cookies:
-                    try:
-                        context.add_cookies(loaded_cookies)
-                    except Exception as e:
-                        print(f"Không thể áp dụng cookies vào trình duyệt: {e}")
-                else:
-                    print("Cảnh báo: Không tìm thấy bất kỳ nguồn cookies nào. Bạn có thể cần đăng nhập thủ công.")
-
-                page = context.new_page()
-                page.set_default_timeout(90000)
-
-                # Kích hoạt Stealth để tránh bị phát hiện bot
                 try:
                     playwright_stealth.stealth(page)
-                except Exception as stealth_err:
-                    print(f"Cảnh báo: Không thể kích hoạt Stealth: {stealth_err}")
+                except Exception as e:
+                    print(f"Stealth warning: {e}")
 
                 self.update_status("Đang truy cập TikTok...")
-                page.goto("https://www.tiktok.com/tiktokstudio/upload", wait_until="domcontentloaded", timeout=90000)
+                page.goto(
+                    "https://www.tiktok.com/tiktokstudio/upload",
+                    wait_until="domcontentloaded"
+                )
 
-                # Nếu trang yêu cầu đăng nhập (do cookie hết hạn hoặc không có)
+                # ⭐ LẦN ĐẦU: yêu cầu login thủ công (chỉ 1 lần)
                 if "login" in page.url:
-                    self.update_status("Vui lòng đăng nhập TikTok trên trình duyệt hiện ra...")
-                    # Chờ cho đến khi người dùng đăng nhập xong và chuyển hướng về trang upload
+                    self.update_status("Vui lòng đăng nhập TikTok để tiếp tục...")
                     try:
-                        page.wait_for_url("**/tiktokstudio/upload", timeout=300000)
+                        page.wait_for_url("**/tiktokstudio/upload", timeout=600000)
                     except:
-                        print("Hết thời gian chờ đăng nhập.")
-                        browser.close()
+                        print("Login timeout")
+                        context.close()
                         return False
 
-                time.sleep(5)
-
+                # ---------------- Upload video ----------------
                 self.update_status("Đang tải video...")
                 file_input = page.locator('input[type="file"]')
                 file_input.wait_for(state="attached", timeout=60000)
                 file_input.set_input_files(video_path)
 
+                # ---------------- Caption ----------------
                 self.update_status("Đang nhập mô tả...")
-                caption_container = page.locator('.notranslate.public-DraftEditor-content')
-                caption_container.wait_for(state="visible", timeout=60000)
-
-                caption_container.click()
+                caption = page.locator('.notranslate.public-DraftEditor-content')
+                caption.wait_for(state="visible", timeout=60000)
+                caption.click()
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")
                 page.keyboard.type(description)
-                time.sleep(2)
 
-                self.update_status("Chờ video tải xong để đăng...")
+                # ---------------- Post ----------------
+                self.update_status("Chờ xử lý video...")
                 post_btn = page.locator('button[data-e2e="post_video_button"]')
 
-                start_wait = time.time()
-                while time.time() - start_wait < 300:
+                start = time.time()
+                while time.time() - start < 300:
                     if post_btn.is_visible() and post_btn.is_enabled():
                         if "Uploading" not in post_btn.inner_text():
                             break
@@ -413,11 +532,12 @@ class VideoAIApp(ctk.CTk):
                 self.update_status("Đã nhấn nút Đăng!")
 
                 time.sleep(15)
-                browser.close()
+                context.close()
                 return True
+
         except Exception:
             print("-" * 30)
-            print("LỖI TIKTOK UPLOAD (PLAYWRIGHT):")
+            print("LỖI TIKTOK UPLOAD (PERSISTENT CONTEXT):")
             traceback.print_exc()
             print("-" * 30)
             return False
@@ -451,6 +571,9 @@ class VideoAIApp(ctk.CTk):
         self.is_processing = True
 
         def run_upload_task():
+            self.update_browser_ui_visibility()
+            self.chromium_user_cancelled = False
+            self.chromium_cancel_event.clear()
             try:
                 description = "Chia sẻ khoảnh khắc thú vị trong ngày của tôi. Hy vọng mọi người thích video này! #trending #xuhuong #dailyvlog #fyp"
                 success = self.upload_to_tiktok_playwright(latest_video, description)
