@@ -63,7 +63,7 @@ class VideoAIApp(ctk.CTk):
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = self.browser_base_path
 
         self.title("AI TikTok Video Generator")
-        self.geometry("750x700")
+        self.geometry("750x750")
 
         self.video_path = ""
         self.is_processing = False
@@ -73,9 +73,10 @@ class VideoAIApp(ctk.CTk):
         # Khởi tạo UI trước khi kiểm tra logic
         self.setup_ui()
 
-        # Trạng thái ban đầu cho các nút hỗ trợ
+        # Ẩn các thông báo lỗi ban đầu
         self.btn_fix_lib.pack_forget()
         self.lib_warning_label.pack_forget()
+        self.magick_link_label.pack_forget()
 
         # Chạy kiểm tra bất đồng bộ sau khi UI hiển thị
         self.after(500, self.async_check_at_startup)
@@ -99,46 +100,55 @@ class VideoAIApp(ctk.CTk):
             return False
 
     def async_check_at_startup(self):
-        """Kiểm tra môi trường không gây treo UI"""
         def task():
-            # Tự động tìm ImageMagick trong thư mục AppData nếu đã cài trước đó
-            self.setup_imagemagick_silent()
+            # 1. Thử tìm ImageMagick tự động
+            has_magick = self.check_imagemagick_installed()
 
-            # Kiểm tra các điều kiện
+            # 2. Kiểm tra Browser
             has_lib = self.check_playwright_lib()
             has_browser = self.has_playwright_chromium()
 
-            # Kiểm tra ImageMagick
-            magick_exe = os.environ.get("IMAGEMAGICK_BINARY")
-            has_magick = magick_exe and os.path.exists(magick_exe)
-
             if not (has_lib and has_browser and has_magick):
-                self.after(0, self.show_fix_ui)
+                self.after(0, lambda: self.show_fix_ui(not has_magick, not has_browser))
             else:
                 self.after(0, lambda: self.update_status("Hệ thống đã sẵn sàng"))
 
         threading.Thread(target=task, daemon=True).start()
 
-    def setup_imagemagick_silent(self):
-        """Tìm kiếm ImageMagick âm thầm trong thư mục cài đặt mặc định của app"""
-        app_data = os.path.join(os.environ.get("APPDATA", ""), "TikTokVideoAI")
-        magick_dir = os.path.join(app_data, "ImageMagick")
+    def check_imagemagick_installed(self):
+        """Kiểm tra ImageMagick trong PATH hoặc AppData"""
+        # Kiểm tra trong biến môi trường hệ thống trước
+        try:
+            # Chạy thử lệnh magick -version
+            subprocess.run(["magick", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            return True
+        except:
+            pass
 
-        for root, _, files in os.walk(magick_dir):
+        # Kiểm tra trong thư mục cục bộ của App nếu có
+        app_data = os.path.join(os.environ.get("APPDATA", ""), "TikTokVideoAI", "ImageMagick")
+        for root, _, files in os.walk(app_data):
             if "magick.exe" in files:
                 path = os.path.join(root, "magick.exe")
                 os.environ["IMAGEMAGICK_BINARY"] = path
                 try:
-                    from moviepy.config import change_settings
                     change_settings({"IMAGEMAGICK_BINARY": path})
                 except: pass
-                return path
-        return None
+                return True
+        return False
 
-    def show_fix_ui(self):
-        self.lib_warning_label.configure(text="⚠️ Hệ thống chưa đủ điều kiện (Thiếu Browser hoặc ImageMagick)")
+    def show_fix_ui(self, missing_magick, missing_browser):
+        msg = "⚠️ Hệ thống chưa đủ điều kiện:\n"
+        if missing_browser:
+            msg += "• Thiếu Browser (Nhấn nút cài đặt bên dưới)\n"
+            self.btn_fix_lib.pack(pady=5)
+
+        if missing_magick:
+            msg += "• Thiếu ImageMagick (Bắt buộc để chèn chữ)\n"
+            self.magick_link_label.pack(pady=5)
+
+        self.lib_warning_label.configure(text=msg)
         self.lib_warning_label.pack(pady=5)
-        self.btn_fix_lib.pack(pady=5)
         self.update_status("Yêu cầu cài đặt môi trường")
 
     def setup_ui(self):
@@ -153,8 +163,14 @@ class VideoAIApp(ctk.CTk):
         self.lib_warning_label = ctk.CTkLabel(
             self, text="", font=("Segoe UI", 12, "bold"), text_color="#ff4d4d"
         )
+
+        # Link tải ImageMagick
+        self.magick_link_label = ctk.CTkTextbox(self, height=60, width=500, fg_color="transparent", text_color="#3498db")
+        self.magick_link_label.insert("1.0", "Tải ImageMagick tại đây, cài xong hãy mở lại App:\nhttps://imagemagick.org/script/download.php#windows")
+        self.magick_link_label.configure(state="disabled")
+
         self.btn_fix_lib = ctk.CTkButton(
-            self, text="CÀI ĐẶT MÔI TRƯỜNG (LẦN ĐẦU)", fg_color="#f39c12",
+            self, text="CÀI ĐẶT MÔI TRƯỜNG (TRÌNH DUYỆT)", fg_color="#f39c12",
             hover_color="#e67e22", command=self.fix_libraries
         )
 
@@ -238,27 +254,12 @@ class VideoAIApp(ctk.CTk):
 
         def run_fix():
             try:
-                # 1. Cài đặt Python Packages
-                self.update_status("1/4: Đang cài đặt thư viện Python...")
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright", "playwright-stealth", "requests", "python-dotenv", "moviepy", "pillow", "py7zr"])
-
-                # 2. Cài đặt Chromium (Chỉ tải nếu chưa có)
+                # Cài đặt Chromium (Chỉ tải nếu chưa có)
                 if not self.has_playwright_chromium():
-                    self.update_status("2/4: Đang tải trình duyệt Chromium (~150MB)...")
-                    subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
+                    self.update_status("Đang tải trình duyệt Chromium (~150MB)...")
+                    subprocess.check_call(["playwright", "install", "chromium"], shell=True)
                 else:
-                    self.update_status("2/4: Trình duyệt đã có sẵn.")
-
-                # 3. Tải ImageMagick Portable
-                self.update_status("3/4: Đang thiết lập ImageMagick...")
-                magick_path = self.setup_imagemagick()
-
-                if magick_path:
-                    self.update_status("4/4: Hoàn tất! Vui lòng khởi động lại App.")
-                    self.after(0, lambda: self.btn_fix_lib.pack_forget())
-                    self.after(0, lambda: self.lib_warning_label.pack_forget())
-                else:
-                    self.update_status("Lỗi: Không tìm thấy ImageMagick sau khi cài.")
+                    self.update_status(" Trình duyệt đã có sẵn.")
 
             except Exception as e:
                 self.update_status(f"Lỗi cài đặt: {str(e)}")
@@ -267,32 +268,6 @@ class VideoAIApp(ctk.CTk):
                 self.after(0, lambda: self.btn_fix_lib.configure(state="normal", text="CÀI ĐẶT MÔI TRƯỜNG"))
 
         threading.Thread(target=run_fix, daemon=True).start()
-
-    def setup_imagemagick(self):
-        """Tải và cấu hình ImageMagick, có hỗ trợ chọn file thủ công nếu link hỏng"""
-        app_data = os.path.join(os.environ.get("APPDATA"), "TikTokVideoAI")
-        magick_dir = os.path.join(app_data, "ImageMagick")
-
-        # Thử tìm trước
-        path = self.setup_imagemagick_silent()
-        if path: return path
-
-        # Tải mới
-        url = "https://imagemagick.org/archive/binaries/ImageMagick-7.1.2-11-portable-Q16-x64.7z"
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            r = requests.get(url, stream=True, timeout=30, headers=headers)
-            r.raise_for_status()
-            self.extract_archive(r.content, magick_dir)
-            return self.setup_imagemagick_silent()
-        except Exception as e:
-            # Fallback nếu link chính hỏng, mở hộp thoại chọn file
-            self.update_status("Lỗi tải tự động. Vui lòng chọn file .7z đã tải thủ công.\nBạn hãy tải file .7z từ Drive/Dropbox rồi nhấn 'CHỌN & UPLOAD' để cấu hình!\nTải file tại: https://www.dropbox.com/scl/fi/37ib4hsd0su8gm1vd7nbt/ImageMagick-7.1.2-11-portable-Q16-x64.7z?rlkey=nlgqkckfsx07mygr7zlo34kin&st=b02y5yz9&dl=1\nHoặc tại: https://drive.google.com/file/d/1GUSKI8Mo8Gomyd_rnc_hgpX5Iv1KV5vU/view?usp=sharing\n")
-            file_path = filedialog.askopenfilename(title="Chọn file ImageMagick (.7z)", filetypes=[("Archive", "*.7z *.zip")])
-            if file_path:
-                self.extract_archive(file_path, magick_dir)
-                return self.setup_imagemagick_silent()
-        return None
 
     def extract_archive(self, file_source, target_dir):
         """Giải nén tự động cho cả file .zip và .7z"""
@@ -537,14 +512,14 @@ class VideoAIApp(ctk.CTk):
                 video_resized = clip.resized(width=int(target_w))
                 video_centered = video_resized.with_position(('center', 'center'))
 
-                # Tìm font trong thư mục _internal (đã đóng gói) hoặc thư mục gốc (dev)
-                if getattr(sys, 'frozen', False):
-                    font_path = os.path.join(self.base_dir, "_internal", "font.ttf")
-                else:
-                    font_path = os.path.join(self.base_dir, "font.ttf")
+                # Tìm font
+                def get_resource_path(relative_path):
+                    if hasattr(sys, '_MEIPASS'):
+                        return os.path.join(sys._MEIPASS, relative_path)
+                    return os.path.join(os.path.abspath("."), relative_path)
 
-                if not os.path.exists(font_path):
-                    font_path = "Arial" # Fallback nếu mất file font
+                # Khi dùng font:
+                font_path = get_resource_path("font.ttf")
 
                 txt_clip = TextClip(
                     text=display_text, font_size=50, color='white', font=font_path,
