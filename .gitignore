@@ -1,12 +1,7 @@
-.env
 .venv
-videos/
-__pycache__/
+build/
+dist/
 input/
 output/
-tiktok_env/
-cookies.txt
 pw_profile/
-dist/
-build/
-
+.env

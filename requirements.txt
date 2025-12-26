@@ -1,10 +1,23 @@
+# Giao diện
 customtkinter
-requests
-python-dotenv
-moviepy
+
+# AI & Môi trường
 google-genai
-httpx>=0.27.0,<0.28.0
+python-dotenv
+
+# Xử lý Video (Lưu ý: MoviePy 2.0+ yêu cầu thêm các thư viện bổ trợ)
+moviepy>=2.0.0
+numpy
+imageio
+imageio-ffmpeg
+proglog
+decorator
+tqdm
+
+# Tự động hóa trình duyệt (TikTok Upload)
 playwright
 playwright-stealth
-pyee
-websockets
+
+# Khác
+pillow
+py7zr

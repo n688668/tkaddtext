@@ -1,3 +1,9 @@
+# CMD
+# python -m venv .venv
+# .venv\Scripts\activate.bat
+# python -m pip install --upgrade pip
 # pip install -r requirements.txt
-# https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc?pli=1
-# https://chromewebstore.google.com/detail/editthiscookie-v3/ojfebgpkimhlhcblbalbfjblapadhbol?hl=vi&utm_source=ext_sidebar
+# playwright install chromium
+
+# .env
+GEMINI_API_KEY="GEMINI_API_KEY_IS_HERE"

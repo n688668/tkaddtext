@@ -1,4 +1,8 @@
+import io
+import sys
 import os
+import requests
+import zipfile
 import threading
 import time
 import random
@@ -7,10 +11,17 @@ import sys
 import subprocess
 import traceback
 import customtkinter as ctk
+from tkinter import filedialog
 from google import genai
 from dotenv import load_dotenv
-# Cập nhật cách import cho MoviePy 2.0+
-from moviepy import VideoFileClip, TextClip, CompositeVideoClip, ColorClip
+
+# Import MoviePy 2.0+
+try:
+    from moviepy import VideoFileClip, TextClip, CompositeVideoClip, ColorClip
+    from moviepy.config import change_settings
+except ImportError:
+    # Sẽ được xử lý trong phần fix_libraries
+    pass
 
 # 1. Nạp biến môi trường từ file .env
 load_dotenv()
@@ -18,7 +29,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Cấu hình Client Gemini
 if GEMINI_API_KEY:
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+    except:
+        client = None
 else:
     client = None
 
@@ -27,177 +41,56 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 class VideoAIApp(ctk.CTk):
-    def has_playwright_chromium(self):
-        browser_dir = os.path.join(
-            os.environ.get("LOCALAPPDATA"),
-            "ms-playwright"
-        )
-
-        if not os.path.isdir(browser_dir):
-            return False
-
-        for root, _, files in os.walk(browser_dir):
-            if "chrome.exe" in files:
-                return True
-
-        return False
-
-    def update_browser_ui_visibility(self):
-        has_browser = self.has_playwright_chromium()
-
-        if has_browser:
-            self.update_status("Sẵn sàng", 0)
-            self.progress_bar.pack_forget()
-            self.btn_cancel_download.pack_forget()
-        else:
-            self.progress_bar.pack(pady=10)
-            self.btn_cancel_download.pack(pady=5)
-            self.btn_cancel_download.configure(state="disabled")
-
     def __init__(self):
         super().__init__()
 
+        # Xác định thư mục gốc (Base Directory)
+        if getattr(sys, 'frozen', False):
+            self.base_dir = os.path.dirname(sys.executable)
+        else:
+            self.base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Thư mục input luôn nằm cùng cấp với Base Directory
+        self.input_dir = os.path.join(self.base_dir, "input")
+        self.output_dir = os.path.join(self.base_dir, "output")
+
+        # Tự động tạo thư mục nếu chưa có để tránh lỗi
+        os.makedirs(self.input_dir, exist_ok=True)
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        # Đặt đường dẫn trình duyệt ngay lập tức
+        self.browser_base_path = os.path.join(os.environ.get("LOCALAPPDATA", ""), "ms-playwright")
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = self.browser_base_path
+
         self.title("AI TikTok Video Generator")
-        self.geometry("750x650")
+        self.geometry("750x700")
 
         self.video_path = ""
         self.is_processing = False
         self.stop_requested = False
         self.target_count = 0
 
-        self.chromium_user_cancelled = False
-        self.chromium_download_process = None
-        self.chromium_cancel_event = threading.Event()
-
-        # Trạng thái thư viện (Kiểm tra động)
-        self.has_playwright = self.check_playwright()
-
-        # Khởi tạo UI
+        # Khởi tạo UI trước khi kiểm tra logic
         self.setup_ui()
 
-        # Thông báo lỗi ra console nếu thiếu thư viện
-        if not self.has_playwright:
-            print("-" * 50)
-            print("HƯỚNG DẪN SỬA LỖI THƯ VIỆN (Dành cho VS Code Git Bash):")
-            print(f"BƯỚC 1: Chạy lệnh cài đặt:")
-            print(f"'{sys.executable}' -m pip install playwright playwright-stealth browser-cookie3")
-            print(f"BƯỚC 2: Cài đặt trình duyệt:")
-            print(f"'{sys.executable}' -m playwright install chromium")
-            print("-" * 50)
+        # Trạng thái ban đầu cho các nút hỗ trợ
+        self.btn_fix_lib.pack_forget()
+        self.lib_warning_label.pack_forget()
 
-        self.update_browser_ui_visibility()
+        # Chạy kiểm tra bất đồng bộ sau khi UI hiển thị
+        self.after(500, self.async_check_at_startup)
 
-    def cancel_chromium_download(self):
-        self.chromium_user_cancelled = True
-        self.chromium_cancel_event.set()
-
-        if self.chromium_download_process:
-            try:
-                self.chromium_download_process.terminate()
-            except:
-                pass
-
-        self.update_status(
-            "Bạn đã hủy tải trình duyệt.\nNhấn Upload lại nếu muốn tiếp tục.",
-            0
-        )
-        self.btn_cancel_download.configure(state="disabled")
-
-    def fake_download_progress(self, stop_event, cancel_event):
-        progress = 0.05
-        self.progress_bar.set(progress)
-
-        while not stop_event.is_set() and not cancel_event.is_set():
-            time.sleep(random.uniform(0.3, 0.7))
-            progress += random.uniform(0.02, 0.05)
-            progress = min(progress, 0.9)
-            self.progress_bar.set(progress)
-
-        if stop_event.is_set():
-            self.progress_bar.set(1.0)
-
-    def ensure_playwright_chromium(self, retries=2, timeout=600):
-        if self.chromium_user_cancelled:
-            self.update_status(
-                "Đã hủy tải trước đó.\nVui lòng bấm Upload lại để tiếp tục.",
-                0
-            )
+    def has_playwright_chromium(self):
+        """Kiểm tra file thực thi chrome.exe"""
+        if not os.path.isdir(self.browser_base_path):
             return False
-
-        browser_dir = os.path.join(
-            os.environ.get("LOCALAPPDATA"),
-            "ms-playwright"
-        )
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = browser_dir
-
-        # ---- kiểm tra đã có chromium chưa ----
-        if os.path.isdir(browser_dir):
-            for root, _, files in os.walk(browser_dir):
-                if "chrome.exe" in files:
-                    return True
-
-        for attempt in range(1, retries + 1):
-            self.chromium_cancel_event.clear()
-            stop_event = threading.Event()
-
-            self.update_status(
-                f"Đang tải trình duyệt nền lần đầu (~150MB)\nQuá trình này chỉ diễn ra một lần.\nVui lòng không tắt ứng dụng.\n"
-                f"Lần thử {attempt}/{retries}",
-                0.05
-            )
-            self.btn_cancel_download.configure(state="normal")
-
-            # ---- download thread ----
-            def download():
-                try:
-                    self.chromium_download_process = subprocess.Popen(
-                        [sys.executable, "-m", "playwright", "install", "chromium"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
-                    self.chromium_download_process.wait()
-                finally:
-                    stop_event.set()
-
-            threading.Thread(target=download, daemon=True).start()
-            threading.Thread(
-                target=self.fake_download_progress,
-                args=(stop_event, self.chromium_cancel_event),
-                daemon=True
-            ).start()
-
-            # ---- timeout watchdog ----
-            start = time.time()
-            while not stop_event.is_set():
-                if self.chromium_cancel_event.is_set():
-                    return False
-                if time.time() - start > timeout:
-                    try:
-                        self.chromium_download_process.terminate()
-                    except:
-                        pass
-                    self.update_status("Tải trình duyệt bị timeout.", 0)
-                    break
-                time.sleep(0.3)
-
-            self.btn_cancel_download.configure(state="disabled")
-
-            # ---- kiểm tra lại ----
-            if os.path.isdir(browser_dir):
-                for root, _, files in os.walk(browser_dir):
-                    if "chrome.exe" in files:
-                        self.update_status("Tải trình duyệt hoàn tất!", 1.0)
-                        self.update_browser_ui_visibility()
-                        return True
-
-            self.update_status("Tải thất bại. Đang thử lại...", 0)
-
-        self.update_status("Không thể tải trình duyệt. Vui lòng kiểm tra mạng.", 0)
+        for root, _, files in os.walk(self.browser_base_path):
+            if "chrome.exe" in files:
+                return True
         return False
 
-
-    def check_playwright(self):
-        """Kiểm tra xem thư viện có tồn tại không bằng cách thử import trực tiếp"""
+    def check_playwright_lib(self):
+        """Kiểm tra thư viện python"""
         try:
             import playwright
             import playwright_stealth
@@ -205,40 +98,65 @@ class VideoAIApp(ctk.CTk):
         except ImportError:
             return False
 
+    def async_check_at_startup(self):
+        """Kiểm tra môi trường không gây treo UI"""
+        def task():
+            # Tự động tìm ImageMagick trong thư mục AppData nếu đã cài trước đó
+            self.setup_imagemagick_silent()
+
+            # Kiểm tra các điều kiện
+            has_lib = self.check_playwright_lib()
+            has_browser = self.has_playwright_chromium()
+
+            # Kiểm tra ImageMagick
+            magick_exe = os.environ.get("IMAGEMAGICK_BINARY")
+            has_magick = magick_exe and os.path.exists(magick_exe)
+
+            if not (has_lib and has_browser and has_magick):
+                self.after(0, self.show_fix_ui)
+            else:
+                self.after(0, lambda: self.update_status("Hệ thống đã sẵn sàng"))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def setup_imagemagick_silent(self):
+        """Tìm kiếm ImageMagick âm thầm trong thư mục cài đặt mặc định của app"""
+        app_data = os.path.join(os.environ.get("APPDATA", ""), "TikTokVideoAI")
+        magick_dir = os.path.join(app_data, "ImageMagick")
+
+        for root, _, files in os.walk(magick_dir):
+            if "magick.exe" in files:
+                path = os.path.join(root, "magick.exe")
+                os.environ["IMAGEMAGICK_BINARY"] = path
+                try:
+                    from moviepy.config import change_settings
+                    change_settings({"IMAGEMAGICK_BINARY": path})
+                except: pass
+                return path
+        return None
+
+    def show_fix_ui(self):
+        self.lib_warning_label.configure(text="⚠️ Hệ thống chưa đủ điều kiện (Thiếu Browser hoặc ImageMagick)")
+        self.lib_warning_label.pack(pady=5)
+        self.btn_fix_lib.pack(pady=5)
+        self.update_status("Yêu cầu cài đặt môi trường")
+
     def setup_ui(self):
         # Header
         self.header_label = ctk.CTkLabel(self, text="AI TIKTOK VIDEO CREATOR", font=("Segoe UI", 24, "bold"))
         self.header_label.pack(pady=(20, 10))
 
-        auth_info = (
-            "🔐 XÁC THỰC TÀI KHOẢN TIKTOK\n"
-            "• Ứng dụng sẽ yêu cầu đăng nhập TikTok trong lần sử dụng đầu tiên.\n"
-            "• Thông tin đăng nhập được lưu an toàn trên máy của bạn.\n"
-            "• Các lần sau không cần đăng nhập lại.\n"
-            "• Không chia sẻ tài khoản cho bất kỳ bên thứ ba nào."
-        )
-
+        auth_info = "XÁC THỰC TÀI KHOẢN TIKTOK\n• Ứng dụng sẽ yêu cầu đăng nhập lần đầu.\n• Thông tin được lưu an toàn trên máy bạn."
         self.info_label = ctk.CTkLabel(self, text=auth_info, font=("Segoe UI", 11), text_color="#00ffcc", justify="center")
         self.info_label.pack(pady=5)
 
-        # Hiển thị cảnh báo trực tiếp trên UI nếu thiếu thư viện
         self.lib_warning_label = ctk.CTkLabel(
-            self,
-            text="⚠️ Ứng dụng chưa sẵn sàng để sử dụng.\nVui lòng khởi động lại hoặc liên hệ hỗ trợ.",
-            font=("Segoe UI", 12, "bold"),
-            text_color="#ff4d4d"
+            self, text="", font=("Segoe UI", 12, "bold"), text_color="#ff4d4d"
         )
-        if not self.has_playwright:
-            self.lib_warning_label.pack(pady=5)
-
-            self.btn_fix_lib = ctk.CTkButton(
-                self,
-                text="SỬA LỖI THƯ VIỆN NGAY",
-                fg_color="#f39c12",
-                hover_color="#e67e22",
-                command=self.fix_libraries
-            )
-            self.btn_fix_lib.pack(pady=5)
+        self.btn_fix_lib = ctk.CTkButton(
+            self, text="CÀI ĐẶT MÔI TRƯỜNG (LẦN ĐẦU)", fg_color="#f39c12",
+            hover_color="#e67e22", command=self.fix_libraries
+        )
 
         # Input Frame
         self.input_frame = ctk.CTkFrame(self)
@@ -248,27 +166,32 @@ class VideoAIApp(ctk.CTk):
         self.prompt_label = ctk.CTkLabel(self.input_frame, text="Prompt (Tiếng Việt):")
         self.prompt_label.pack(pady=(10, 0), padx=20, anchor="w")
 
-        default_prompt = (
-            "Hãy đóng vai một người cực kỳ nhiều chuyện, số nhọ, làm gì cũng hỏng và luôn gặp khó khăn trong cuộc sống. "
+        self.default_prompt = (
+            "Hãy đóng vai một cô gái ngốc nghếch."
             "Hãy viết một dòng trạng thái (status) than vãn, kể khổ về chủ đề: ngẫu nhiên. "
-            "Yêu cầu: Giọng văn phải đậm chất 'drama', hay than thân trách phận, kể lể những xui xẻo mình gặp phải và hỏi xin lời khuyên hoặc sự đồng cảm từ cộng đồng mạng. "
-            "Sử dụng ngôn ngữ đời thường, có chút hờn dỗi, dùng nhiều từ cảm thán (ôi trời, sao tôi khổ thế, mệt mỏi quá...), độ dài khoảng 40-90 chữ. "
+            "Yêu cầu: Giọng văn hay than thân trách phận. "
+            "Sử dụng ngôn ngữ đời thường, độ dài khoảng 40-90 chữ. "
             "Chỉ trả về nội dung status bằng tiếng Việt, không thêm bất kỳ văn bản dẫn nhập nào khác."
         )
 
-        self.default_prompt = default_prompt
         self.prompt_entry = ctk.CTkTextbox(self.input_frame, height=100, wrap="word")
         self.prompt_entry.insert("1.0", self.default_prompt)
         self.prompt_entry.pack(pady=(5, 15), padx=20, fill="both")
 
+        # --- Phần nhập Số lượng video ---
+        qty_frame = ctk.CTkFrame(self.input_frame, fg_color="transparent")
+        qty_frame.pack(pady=(0, 15), padx=20, anchor="w")
+
+        self.qty_label = ctk.CTkLabel(qty_frame, text="Số lượng video tự động tạo:", font=("Segoe UI", 12))
+        self.qty_label.grid(row=0, column=0, padx=(0, 10))
+
+        self.qty_entry = ctk.CTkEntry(qty_frame, width=60, justify="center")
+        self.qty_entry.insert(0, "1")
+        self.qty_entry.grid(row=0, column=1)
+
         # TikTok Upload Option
         self.upload_var = ctk.BooleanVar(value=True)
-        self.upload_checkbox = ctk.CTkCheckBox(
-            self,
-            text="Tự động đăng video lên TikTok",
-            variable=self.upload_var,
-            font=("Segoe UI", 12)
-        )
+        self.upload_checkbox = ctk.CTkCheckBox(self, text="Tự động đăng video lên TikTok", variable=self.upload_var, font=("Segoe UI", 12))
         self.upload_checkbox.pack(pady=5)
 
         # Chọn ngẫu nhiên video nền
@@ -278,117 +201,144 @@ class VideoAIApp(ctk.CTk):
         btn_frame = ctk.CTkFrame(self)
         btn_frame.pack(pady=(15, 6))
 
-        self.btn_run = ctk.CTkButton(
-            btn_frame,
-            text="TẠO VIDEO TIKTOK",
-            command=self.start_process,
-            height=50,
-            width=220,
-            font=("Segoe UI", 16, "bold"),
-            fg_color="#fe2c55"
-        )
+        self.btn_run = ctk.CTkButton(btn_frame, text="TẠO VIDEO & UPLOAD TIKTOK", command=self.start_process, height=50, width=220, font=("Segoe UI", 16, "bold"), fg_color="#fe2c55")
         self.btn_run.grid(row=0, column=0, padx=(0, 10))
 
-        self.btn_stop = ctk.CTkButton(
-            btn_frame,
-            text="DỪNG TẠO VIDEO",
-            command=self.request_stop,
-            height=50,
-            width=140,
-            font=("Segoe UI", 12, "bold"),
-            fg_color="#6b6b6b"
-        )
+        self.btn_stop = ctk.CTkButton(btn_frame, text="DỪNG TẠO VIDEO TIẾP THEO", command=self.request_stop, height=50, width=140, font=("Segoe UI", 12, "bold"), fg_color="#6b6b6b")
         self.btn_stop.grid(row=0, column=1)
         self.btn_stop.configure(state="disabled")
 
-        # Nút Upload riêng biệt
-        self.btn_upload_only = ctk.CTkButton(
-            self,
-            text="CHỈ UPLOAD VIDEO MỚI NHẤT",
-            command=self.start_upload_only,
-            height=40,
-            width=300,
-            font=("Segoe UI", 13, "bold"),
-            fg_color="#27ae60",
-            hover_color="#2ecc71"
-        )
-        self.btn_upload_only.pack(pady=10)
+        # --- Folder & Manual Upload Frame ---
+        secondary_btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        secondary_btn_frame.pack(pady=10)
 
-        # Number of videos input
-        qty_frame = ctk.CTkFrame(self)
-        qty_frame.pack(pady=(6, 0))
+        # 1. Nút Chọn và Upload thủ công
+        self.btn_upload_manual = ctk.CTkButton(secondary_btn_frame, text="CHỌN & UPLOAD", command=self.start_manual_upload, height=40, width=160, font=("Segoe UI", 12, "bold"), fg_color="#27ae60", hover_color="#2ecc71")
+        self.btn_upload_manual.grid(row=0, column=0, padx=5)
 
-        self.qty_label = ctk.CTkLabel(qty_frame, text="Số lượng video:")
-        self.qty_label.grid(row=0, column=0, padx=(0, 8))
-        self.qty_entry = ctk.CTkEntry(qty_frame, width=80)
-        self.qty_entry.insert(0, "1")
-        self.qty_entry.grid(row=0, column=1)
+        # 2. Nút Mở thư mục INPUT (MỚI THÊM)
+        self.btn_open_input = ctk.CTkButton(secondary_btn_frame, text="THƯ MỤC INPUT", command=self.open_input_folder, height=40, width=160, font=("Segoe UI", 12, "bold"), fg_color="#8e44ad", hover_color="#9b59b6")
+        self.btn_open_input.grid(row=0, column=1, padx=5)
+
+        # 3. Nút Mở thư mục OUTPUT
+        self.btn_open_folder = ctk.CTkButton(secondary_btn_frame, text="THƯ MỤC OUTPUT", command=self.open_output_folder, height=40, width=160, font=("Segoe UI", 12, "bold"), fg_color="#34495e", hover_color="#2c3e50")
+        self.btn_open_folder.grid(row=0, column=2, padx=5)
 
         # Status & Progress
-        self.status_label = ctk.CTkLabel(self, text="Trạng thái: Sẵn sàng", text_color="#aaaaaa", wraplength=600)
+        self.status_label = ctk.CTkLabel(self, text="Trạng thái: Đang kiểm tra hệ thống...", text_color="#aaaaaa", wraplength=600)
         self.status_label.pack(pady=5)
 
         self.progress_bar = ctk.CTkProgressBar(self, width=450)
         self.progress_bar.pack(pady=10)
         self.progress_bar.set(0)
 
-        self.btn_cancel_download = ctk.CTkButton(
-            self,
-            text="HỦY TẢI TRÌNH DUYỆT",
-            fg_color="#e74c3c",
-            hover_color="#c0392b",
-            command=self.cancel_chromium_download
-        )
-        self.btn_cancel_download.pack(pady=5)
-        self.btn_cancel_download.configure(state="disabled")
-
-
     def fix_libraries(self):
-        """Tự động chạy lệnh cài đặt pip cho phiên bản Python hiện tại"""
-        self.update_status("Đang cài đặt... Kiểm tra console (VS Code) để xem chi tiết.")
+        """NÚT CÀI ĐẶT MÔI TRƯỜNG TỔNG HỢP"""
+        self.btn_fix_lib.configure(state="disabled", text="ĐANG CÀI ĐẶT...")
+
         def run_fix():
             try:
-                # Chạy pip install bằng chính trình thông dịch đang chạy script
-                subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", "playwright-stealth"])
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright", "playwright-stealth", "browser-cookie3"])
-                # Cài đặt trình duyệt chromium
-                subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
+                # 1. Cài đặt Python Packages
+                self.update_status("1/4: Đang cài đặt thư viện Python...")
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright", "playwright-stealth", "requests", "python-dotenv", "moviepy", "pillow", "py7zr"])
 
-                # Cập nhật lại trạng thái
-                self.has_playwright = self.check_playwright()
-                if self.has_playwright:
-                    self.lib_warning_label.pack_forget()
-                    if hasattr(self, 'btn_fix_lib'): self.btn_fix_lib.pack_forget()
-                    self.update_status("Cài đặt thành công!")
+                # 2. Cài đặt Chromium (Chỉ tải nếu chưa có)
+                if not self.has_playwright_chromium():
+                    self.update_status("2/4: Đang tải trình duyệt Chromium (~150MB)...")
+                    subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
                 else:
-                    self.update_status("Cài đặt xong nhưng hệ thống chưa nhận diện. Vui lòng mở lại App.")
+                    self.update_status("2/4: Trình duyệt đã có sẵn.")
 
-                print("--- CÀI ĐẶT HOÀN TẤT THÀNH CÔNG ---")
+                # 3. Tải ImageMagick Portable
+                self.update_status("3/4: Đang thiết lập ImageMagick...")
+                magick_path = self.setup_imagemagick()
+
+                if magick_path:
+                    self.update_status("4/4: Hoàn tất! Vui lòng khởi động lại App.")
+                    self.after(0, lambda: self.btn_fix_lib.pack_forget())
+                    self.after(0, lambda: self.lib_warning_label.pack_forget())
+                else:
+                    self.update_status("Lỗi: Không tìm thấy ImageMagick sau khi cài.")
+
             except Exception as e:
-                self.update_status("Lỗi cài đặt thư viện. Kiểm tra console để xem chi tiết.")
-                print("-" * 30)
-                print("LỖI CÀI ĐẶT THƯ VIỆN:")
+                self.update_status(f"Lỗi cài đặt: {str(e)}")
                 traceback.print_exc()
-                print("-" * 30)
+            finally:
+                self.after(0, lambda: self.btn_fix_lib.configure(state="normal", text="CÀI ĐẶT MÔI TRƯỜNG"))
 
         threading.Thread(target=run_fix, daemon=True).start()
 
-    def set_random_video(self):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        input_dir = os.path.join(script_dir, "input")
-        exts = (".mp4", ".mov", ".avi", ".mkv")
-        candidates = []
-        if os.path.isdir(input_dir):
-            for fn in os.listdir(input_dir):
-                if fn.lower().endswith(exts):
-                    candidates.append(os.path.join(input_dir, fn))
-        if candidates:
-            self.video_path = random.choice(candidates)
+    def setup_imagemagick(self):
+        """Tải và cấu hình ImageMagick, có hỗ trợ chọn file thủ công nếu link hỏng"""
+        app_data = os.path.join(os.environ.get("APPDATA"), "TikTokVideoAI")
+        magick_dir = os.path.join(app_data, "ImageMagick")
+
+        # Thử tìm trước
+        path = self.setup_imagemagick_silent()
+        if path: return path
+
+        # Tải mới
+        url = "https://imagemagick.org/archive/binaries/ImageMagick-7.1.2-11-portable-Q16-x64.7z"
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            r = requests.get(url, stream=True, timeout=30, headers=headers)
+            r.raise_for_status()
+            self.extract_archive(r.content, magick_dir)
+            return self.setup_imagemagick_silent()
+        except Exception as e:
+            # Fallback nếu link chính hỏng, mở hộp thoại chọn file
+            self.update_status("Lỗi tải tự động. Vui lòng chọn file .7z đã tải thủ công.\nBạn hãy tải file .7z từ Drive/Dropbox rồi nhấn 'CHỌN & UPLOAD' để cấu hình!\nTải file tại: https://www.dropbox.com/scl/fi/37ib4hsd0su8gm1vd7nbt/ImageMagick-7.1.2-11-portable-Q16-x64.7z?rlkey=nlgqkckfsx07mygr7zlo34kin&st=b02y5yz9&dl=1\nHoặc tại: https://drive.google.com/file/d/1GUSKI8Mo8Gomyd_rnc_hgpX5Iv1KV5vU/view?usp=sharing\n")
+            file_path = filedialog.askopenfilename(title="Chọn file ImageMagick (.7z)", filetypes=[("Archive", "*.7z *.zip")])
+            if file_path:
+                self.extract_archive(file_path, magick_dir)
+                return self.setup_imagemagick_silent()
+        return None
+
+    def extract_archive(self, file_source, target_dir):
+        """Giải nén tự động cho cả file .zip và .7z"""
+        os.makedirs(target_dir, exist_ok=True)
+
+        if isinstance(file_source, bytes):
+            stream = io.BytesIO(file_source)
+        else:
+            stream = open(file_source, "rb")
+
+        try:
+            import py7zr
+            with py7zr.SevenZipFile(stream, mode='r') as z:
+                z.extractall(target_dir)
+            return True
+        except Exception as e:
+            traceback.print_exc()
+            return False
+        finally:
+            if not isinstance(file_source, bytes): stream.close()
 
     def update_status(self, text, progress=None):
-        self.status_label.configure(text=f"Trạng thái: {text}")
-        if progress is not None:
-            self.progress_bar.set(progress)
+        if hasattr(self, 'status_label'):
+            self.status_label.configure(text=f"Trạng thái: {text}")
+
+        if hasattr(self, 'progress_bar'):
+            if progress is not None:
+                # Nếu có giá trị progress, đảm bảo thanh bar đang hiện
+                if not self.progress_bar.winfo_viewable():
+                    self.progress_bar.pack(pady=10)
+                self.progress_bar.set(progress)
+            else:
+                # Nếu không có progress (ví dụ lúc chờ), có thể ẩn đi cho đẹp
+                self.progress_bar.pack_forget()
+                pass
+
+    def open_output_folder(self):
+        os.startfile(self.output_dir)
+
+    def open_input_folder(self):
+        os.startfile(self.input_dir)
+
+    def set_random_video(self):
+        candidates = [os.path.join(self.input_dir, f) for f in os.listdir(self.input_dir) if f.lower().endswith((".mp4", ".mov", ".avi"))]
+        if candidates:
+            self.video_path = random.choice(candidates)
 
     def split_text(self, text, max_chars_per_line=22):
         words = text.split()
@@ -405,64 +355,26 @@ class VideoAIApp(ctk.CTk):
         return "\n".join(lines)
 
     def generate_content_with_fallback(self, prompt):
-        models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash"]
-        last_exception = None
-        for model_name in models_to_try:
+        if not client: raise Exception("API Key chưa cấu hình.")
+        for model_name in ["gemini-2.0-flash", "gemini-2.5-flash"]:
             try:
                 response = client.models.generate_content(model=model_name, contents=prompt)
                 return response.text.strip().replace('"', '')
-            except Exception:
-                last_exception = sys.exc_info()
-                continue
-        if last_exception:
-            print("--- LỖI GOOGLE GEMINI API ---")
-            traceback.print_exception(*last_exception)
-            print("-" * 30)
-        raise Exception("Không thể kết nối với Gemini API.")
+            except: continue
+        raise Exception("Không thể kết nối Gemini API.")
 
-    # ===== PLAYWRIGHT PERSISTENT PROFILE =====
     def get_pw_profile_dir(self):
-        if getattr(sys, 'frozen', False):
-            base = os.path.join(
-                os.environ.get("APPDATA"),
-                "TikTokVideoAI",
-                "pw_profile"
-            )
-        else:
-            base = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "pw_profile"
-            )
-
-        os.makedirs(base, exist_ok=True)
-        return base
-
+        path = os.path.join(os.environ.get("APPDATA", ""), "TikTokVideoAI", "pw_profile")
+        os.makedirs(path, exist_ok=True)
+        return path
 
     def upload_to_tiktok_playwright(self, video_path, description):
-        # ⭐ BẮT BUỘC: set path browser TRƯỚC khi import playwright
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(
-            os.environ.get("LOCALAPPDATA"),
-            "ms-playwright"
-        )
-
-        # ⭐ Đảm bảo Chromium tồn tại (tự tải nếu thiếu)
-        if not self.ensure_playwright_chromium():
-            self.update_status("Không thể tải Chromium.")
-            return False
-
-        if not self.check_playwright():
-            print("LỖI: Playwright chưa sẵn sàng.")
-            return False
-
         from playwright.sync_api import sync_playwright
         import playwright_stealth
-
         profile_dir = self.get_pw_profile_dir()
 
         try:
-
             with sync_playwright() as p:
-                # ⭐ Persistent Context: GIỮ COOKIE + LOGIN
                 context = p.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=False,
@@ -492,9 +404,8 @@ class VideoAIApp(ctk.CTk):
                     wait_until="domcontentloaded"
                 )
 
-                # ⭐ LẦN ĐẦU: yêu cầu login thủ công (chỉ 1 lần)
                 if "login" in page.url:
-                    self.update_status("Vui lòng đăng nhập TikTok để tiếp tục...")
+                    self.update_status("Vui lòng đăng nhập TikTok trên trình duyệt để tiếp tục...")
                     try:
                         page.wait_for_url("**/tiktokstudio/upload", timeout=600000)
                     except:
@@ -502,13 +413,11 @@ class VideoAIApp(ctk.CTk):
                         context.close()
                         return False
 
-                # ---------------- Upload video ----------------
                 self.update_status("Đang tải video...")
                 file_input = page.locator('input[type="file"]')
                 file_input.wait_for(state="attached", timeout=60000)
                 file_input.set_input_files(video_path)
 
-                # ---------------- Caption ----------------
                 self.update_status("Đang nhập mô tả...")
                 caption = page.locator('.notranslate.public-DraftEditor-content')
                 caption.wait_for(state="visible", timeout=60000)
@@ -517,7 +426,6 @@ class VideoAIApp(ctk.CTk):
                 page.keyboard.press("Backspace")
                 page.keyboard.type(description)
 
-                # ---------------- Post ----------------
                 self.update_status("Chờ xử lý video...")
                 post_btn = page.locator('button[data-e2e="post_video_button"]')
 
@@ -542,60 +450,49 @@ class VideoAIApp(ctk.CTk):
             print("-" * 30)
             return False
 
-    def start_upload_only(self):
-        """Logic tìm video mới nhất trong output và upload"""
+    def start_manual_upload(self):
+        """Mở chọn file tại đúng thư mục lưu video và upload"""
         if self.is_processing:
             return
 
-        self.has_playwright = self.check_playwright()
-        if not self.has_playwright:
-            self.update_status("Lỗi: Thiếu thư viện Playwright.")
+        # Mở hộp thoại chọn file
+        selected_file = filedialog.askopenfilename(
+            initialdir=self.output_dir,
+            title="Chọn video để upload",
+            filetypes=[("Video files", "*.mp4 *.mov *.avi *.mkv")]
+        )
+
+        if not selected_file:
             return
 
-        output_dir = os.path.join(os.path.dirname(__file__), "output")
-        if not os.path.isdir(output_dir):
-            self.update_status("Lỗi: Không tìm thấy thư mục output.")
-            return
-
-        # Tìm video mới nhất
-        files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".mp4")]
-        if not files:
-            self.update_status("Lỗi: Không có video nào trong thư mục output.")
-            return
-
-        latest_video = max(files, key=os.path.getctime)
-        filename = os.path.basename(latest_video)
-
+        filename = os.path.basename(selected_file)
         self.update_status(f"Đang chuẩn bị upload: {filename}")
-        self.btn_upload_only.configure(state="disabled")
+        self.btn_upload_manual.configure(state="disabled")
         self.is_processing = True
 
         def run_upload_task():
             self.update_browser_ui_visibility()
-            self.chromium_user_cancelled = False
-            self.chromium_cancel_event.clear()
             try:
-                description = "Chia sẻ khoảnh khắc thú vị trong ngày của tôi. Hy vọng mọi người thích video này! #trending #xuhuong #dailyvlog #fyp"
-                success = self.upload_to_tiktok_playwright(latest_video, description)
+                description = "Khoảnh khắc thú vị! #trending #xuhuong #dailyvlog #cuocsong"
+                success = self.upload_to_tiktok_playwright(selected_file, description)
                 if success:
-                    self.update_status("Upload video cũ thành công!")
+                    self.update_status("Upload thành công!")
                 else:
                     self.update_status("Upload thất bại. Kiểm tra console.")
             finally:
                 self.is_processing = False
-                self.btn_upload_only.configure(state="normal")
+                self.btn_upload_manual.configure(state="normal")
 
         threading.Thread(target=run_upload_task, daemon=True).start()
+
+    def request_stop(self):
+        self.stop_requested = True
+        self.update_status("Đang dừng...")
+        self.btn_stop.configure(state="disabled")
 
     def start_process(self):
         if not GEMINI_API_KEY:
             self.update_status("Lỗi: Thiếu API KEY.", 0)
-            print("CẢNH BÁO: Chưa cấu hình GEMINI_API_KEY trong file .env")
-            return
-
-        self.has_playwright = self.check_playwright()
-        if not self.has_playwright:
-            self.update_status("Lỗi: Thiếu thư viện hệ thống.", 0)
             return
 
         prompt_text = self.prompt_entry.get("1.0", "end").strip() or self.default_prompt
@@ -612,27 +509,22 @@ class VideoAIApp(ctk.CTk):
         self.stop_requested = False
         self.target_count = count
         self.btn_run.configure(state="disabled", text="ĐANG XỬ LÝ...")
-        self.btn_upload_only.configure(state="disabled")
+        self.btn_upload_manual.configure(state="disabled")
         if count > 1: self.btn_stop.configure(state="normal")
 
         thread = threading.Thread(target=self.run_logic, args=(prompt_text, count))
         thread.daemon = True
         thread.start()
 
-    def request_stop(self):
-        self.stop_requested = True
-        self.update_status("Đang dừng...")
-        self.btn_stop.configure(state="disabled")
-
     def run_logic(self, prompt_text, count):
         try:
             for i in range(count):
+                if self.stop_requested: break
                 self.set_random_video()
-                if not self.video_path or self.stop_requested: break
+                if not self.video_path: break
 
                 self.update_status(f"({i+1}/{count}) Đang tạo nội dung...", 0.1)
-                prompt = prompt_text.replace("{topic}", "ngẫu nhiên")
-                raw_content = self.generate_content_with_fallback(prompt)
+                raw_content = self.generate_content_with_fallback(prompt_text)
                 display_text = self.split_text(raw_content, max_chars_per_line=22)
 
                 self.update_status(f"({i+1}/{count}) Đang render video...", 0.4)
@@ -645,8 +537,17 @@ class VideoAIApp(ctk.CTk):
                 video_resized = clip.resized(width=int(target_w))
                 video_centered = video_resized.with_position(('center', 'center'))
 
+                # Tìm font trong thư mục _internal (đã đóng gói) hoặc thư mục gốc (dev)
+                if getattr(sys, 'frozen', False):
+                    font_path = os.path.join(self.base_dir, "_internal", "font.ttf")
+                else:
+                    font_path = os.path.join(self.base_dir, "font.ttf")
+
+                if not os.path.exists(font_path):
+                    font_path = "Arial" # Fallback nếu mất file font
+
                 txt_clip = TextClip(
-                    text=display_text, font_size=50, color='white', font='font.ttf',
+                    text=display_text, font_size=50, color='white', font=font_path,
                     method='caption', size=(int(target_w * 0.9), None),
                     stroke_color='black', stroke_width=2, text_align='center'
                 ).with_duration(duration).with_position(('center', 'center'))
@@ -655,22 +556,23 @@ class VideoAIApp(ctk.CTk):
 
                 ts = time.strftime("%Y%m%d%H%M%S")
                 output_name = f"tiktok_{ts}.mp4"
-                output_dir = os.path.join(os.path.dirname(__file__), "output")
-                os.makedirs(output_dir, exist_ok=True)
-                output_path = os.path.abspath(os.path.join(output_dir, output_name))
+                output_path = os.path.abspath(os.path.join(self.output_dir, output_name))
 
-                final_video.write_videofile(output_path, fps=30, codec="libx264", audio_codec="aac")
+                try:
+                    final_video.write_videofile(output_path, fps=30, codec="libx264", audio_codec="aac")
 
-                if self.upload_var.get():
-                    full_description = f"{raw_content}\n\n#tamtrang #sốnhọ #drama #funny"
-                    self.update_status(f"({i+1}/{count}) Đang đăng TikTok...", 0.8)
-
-                    success = self.upload_to_tiktok_playwright(output_path, full_description)
-
-                    if success:
-                        self.update_status(f"({i+1}/{count}) Đăng thành công!", 1.0)
-                    else:
-                        self.update_status(f"({i+1}/{count}) Upload không thành công.", 0.5)
+                    if self.upload_var.get():
+                        full_description = f"{raw_content}\n\n#tamtrang #cuocsong #trend #tamsu"
+                        self.update_status(f"({i+1}/{count}) Đang đăng TikTok...", 0.8)
+                        success = self.upload_to_tiktok_playwright(output_path, full_description)
+                        if success:
+                            self.update_status(f"({i+1}/{count}) Đăng thành công!", 1.0)
+                        else:
+                            self.update_status(f"({i+1}/{count}) Upload không thành công.", 0.5)
+                finally:
+                    # Đảm bảo luôn đóng clip dù thành công hay thất bại
+                    if 'final_video' in locals(): final_video.close()
+                    if 'clip' in locals(): clip.close()
 
                 if self.stop_requested: break
 
@@ -683,15 +585,12 @@ class VideoAIApp(ctk.CTk):
 
         except Exception:
             self.update_status("Đã xảy ra lỗi hệ thống.", 0)
-            print("-" * 30)
-            print("LỖI QUY TRÌNH CHÍNH (MAIN LOGIC):")
             traceback.print_exc()
-            print("-" * 30)
         finally:
             self.is_processing = False
-            self.btn_run.configure(state="normal", text="TẠO VIDEO TIKTOK")
-            self.btn_upload_only.configure(state="normal")
-            self.btn_stop.configure(state="disabled")
+            self.btn_run.configure(state="normal", text="TẠO VIDEO TIKTOK", height=50, width=220, font=("Segoe UI", 16, "bold"), fg_color="#fe2c55")
+            self.btn_upload_manual.configure(state="normal", height=40, width=160, font=("Segoe UI", 12, "bold"), fg_color="#27ae60", hover_color="#2ecc71")
+            self.btn_stop.configure(state="disabled", height=50, width=140, font=("Segoe UI", 12, "bold"), fg_color="#6b6b6b")
 
 if __name__ == "__main__":
     app = VideoAIApp()
