@@ -16,7 +16,7 @@ VSVersionInfo(
           '040904B0',
           [
             StringStruct('CompanyName', 'dongt6140@gmail.com'),
-            StringStruct('FileDescription', 'AI TikTok Video Generator'),
+            StringStruct('FileDescription', 'AI TIKTOK VIDEO CREATOR'),
             StringStruct('FileVersion', '1.0.0'),
             StringStruct('InternalName', 'TikTokVideoAI'),
             StringStruct('OriginalFilename', 'TikTokVideoAI.exe'),

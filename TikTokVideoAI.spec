@@ -10,37 +10,32 @@ from PyInstaller.utils.hooks import (
 block_cipher = None
 
 # ================== DATAS ==================
-# Khởi tạo danh sách data với các file tĩnh
 datas = [
     ('font.ttf', '.'),
     ('icon.ico', '.'),
     ('version_info.txt', '.'),
+    ('config.env.template', '.'),
+    ('input/bg001.mp4', 'input'),
 ]
 
-# Thu thập data cho CustomTkinter (Quan trọng cho GUI)
 datas += collect_data_files('customtkinter')
-
-# Playwright Stealth
 datas += collect_data_files('playwright_stealth')
 
 # ===== AI & XỬ LÝ MEDIA (NUMPY, MOVIEPY, IMAGEIO) =====
-# MoviePy 2.0+ và các thư viện phụ thuộc yêu cầu metadata để chạy đúng
 packages_to_collect = [
-    'numpy',
-    'imageio',
-    'imageio_ffmpeg',
-    'moviepy',
-    'proglog',
-    'decorator',
-    'tqdm',
-    'pillow',
-    'google.genai'
+    'numpy', 'imageio', 'imageio_ffmpeg', 'moviepy',
+    'proglog', 'decorator', 'pillow', 'google.genai'
 ]
 
 for pkg in packages_to_collect:
     try:
-        datas += collect_data_files(pkg)
-        datas += copy_metadata(pkg)
+        if pkg in ['numpy', 'imageio', 'moviepy']:
+            datas += copy_metadata(pkg)
+
+        if pkg == 'pillow':
+            datas += collect_data_files('PIL')
+        else:
+            datas += collect_data_files(pkg)
     except:
         pass
 
@@ -50,22 +45,27 @@ hiddenimports = [
     'playwright_stealth',
     'google.genai',
     'customtkinter',
-    'PIL.ImageResampling', # Thường bị thiếu trong Pillow mới
+    'PIL.ImageResampling',
     'moviepy.video.fx.all',
     'moviepy.audio.fx.all',
     'moviepy.video.compositing.transitions',
 ]
 
-# Thu thập tất cả submodules để tránh lỗi "ModuleNotFound" khi chạy EXE
 hiddenimports += collect_submodules('moviepy')
 hiddenimports += collect_submodules('imageio')
 hiddenimports += collect_submodules('proglog')
 hiddenimports += collect_submodules('google.genai')
 
+# **************************************************
+# Bổ sung: Thêm Playwright Submodules để kích hoạt hook thu thập driver.exe
+hiddenimports += collect_submodules('playwright')
+# **************************************************
+
 # ================== ANALYSIS ==================
 a = Analysis(
     ['main.py'],
     pathex=[],
+    # Để trống binaries, dựa vào hook tự động của Playwright
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
@@ -97,7 +97,7 @@ exe = EXE(
         'python3.dll',
         'numpy*.pyd',
     ],
-    console=False, # Đặt False để không hiện cửa sổ CMD đen khi chạy app
+    console=False,
     icon='icon.ico',
     version='version_info.txt',
 )

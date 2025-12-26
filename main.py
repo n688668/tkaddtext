@@ -14,6 +14,7 @@ import customtkinter as ctk
 from tkinter import filedialog
 from google import genai
 from dotenv import load_dotenv
+import shutil
 
 # Import MoviePy 2.0+
 try:
@@ -23,18 +24,11 @@ except ImportError:
     # Sẽ được xử lý trong phần fix_libraries
     pass
 
-# 1. Nạp biến môi trường từ file .env
-load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-# Cấu hình Client Gemini
-if GEMINI_API_KEY:
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-    except:
-        client = None
-else:
-    client = None
+# Thêm import cần thiết cho việc cài đặt trình duyệt
+try:
+    from playwright.install import install # type: ignore
+except ImportError:
+    pass
 
 # Cấu hình giao diện
 ctk.set_appearance_mode("dark")
@@ -50,6 +44,52 @@ class VideoAIApp(ctk.CTk):
         else:
             self.base_dir = os.path.dirname(os.path.abspath(__file__))
 
+        # ****************************************************************
+        # B. SỬA ĐỔI CODE: LOGIC TÌM & TẠO FILE .env NGANG CẤP VỚI EXE
+        # ****************************************************************
+        self.env_file_path = os.path.join(self.base_dir, ".env")
+
+        # Đường dẫn tới file template (Giả sử bạn đã đặt config.env.template ngang cấp)
+        template_file_path = os.path.join(self.base_dir, "config.env.template")
+
+        # Nếu file .env chưa tồn tại, tạo ra nó từ template
+        if not os.path.exists(self.env_file_path):
+            try:
+                # Nội dung mẫu mặc định
+                template_content = "GEMINI_API_KEY=YOUR_KEY_HERE\n"
+
+                # Cố gắng đọc template (nếu có, để PyInstaller có thể thêm vào)
+                if os.path.exists(template_file_path):
+                    with open(template_file_path, 'r', encoding='utf-8') as f:
+                        template_content = f.read()
+
+                # Ghi nội dung (mẫu hoặc template) ra file .env mới
+                with open(self.env_file_path, 'w', encoding='utf-8') as f:
+                    f.write(template_content)
+
+                print("INFO: Đã tạo file .env mẫu.")
+
+            except Exception as e:
+                print(f"ERROR: Lỗi khi tạo file .env: {e}")
+
+        # ----------------------------------------------------------------
+        # 2. TÁI ĐỊNH NGHĨA VÀ NẠP BIẾN MÔI TRƯỜNG VÀ CLIENT GEMINI
+        # ----------------------------------------------------------------
+        load_dotenv(dotenv_path=self.env_file_path) # Nạp file .env vừa được tạo/tìm thấy
+
+        # Tái định nghĩa các thuộc tính toàn cục
+        self.GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+        if self.GEMINI_API_KEY and self.GEMINI_API_KEY != "YOUR_KEY_HERE":
+            try:
+                self.client = genai.Client(api_key=self.GEMINI_API_KEY)
+            except:
+                self.client = None
+        else:
+            self.client = None
+
+        # ----------------------------------------------------------------
+
         # Thư mục input luôn nằm cùng cấp với Base Directory
         self.input_dir = os.path.join(self.base_dir, "input")
         self.output_dir = os.path.join(self.base_dir, "output")
@@ -58,12 +98,38 @@ class VideoAIApp(ctk.CTk):
         os.makedirs(self.input_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
 
+        # ****************************************************************
+        # PHẦN SỬA CHỮA: ĐẢM BẢO FILE MẪU LUÔN Ở THƯ MỤC CỦA NGƯỜI DÙNG
+        # ****************************************************************
+
+        # 1. Xác định đường dẫn nguồn (bên trong gói đóng gói)
+        try:
+            # sys._MEIPASS là nơi PyInstaller đặt dữ liệu đóng gói
+            # 'input' là thư mục đích mà ta đã đặt trong --add-data
+            # Lưu ý: 'input/bg001.mp4' phải khớp với tên file đóng gói
+            source_video_path = os.path.join(sys._MEIPASS, "input", "bg001.mp4")
+        except Exception:
+            # Môi trường DEV (chạy bằng python/vscode)
+            source_video_path = os.path.join(self.base_dir, "input", "bg001.mp4")
+
+        # 2. Xác định đường dẫn đích (thư mục input mà người dùng thấy)
+        target_video_path = os.path.join(self.input_dir, "bg001.mp4")
+
+        # 3. Tiến hành Copy nếu file mẫu chưa có ở thư mục của người dùng
+        if os.path.exists(source_video_path) and not os.path.exists(target_video_path):
+            try:
+                shutil.copy2(source_video_path, target_video_path)
+                print("INFO: Đã copy video mẫu vào thư mục input thành công.")
+            except Exception as e:
+                print(f"ERROR: Không thể copy video mẫu: {e}")
+        # ----------------------------------------------------------------
+
         # Đặt đường dẫn trình duyệt ngay lập tức
         self.browser_base_path = os.path.join(os.environ.get("LOCALAPPDATA", ""), "ms-playwright")
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = self.browser_base_path
 
-        self.title("AI TikTok Video Generator")
-        self.geometry("750x750")
+        self.title("AI TIKTOK VIDEO CREATOR")
+        self.geometry("680x860")
 
         self.video_path = ""
         self.is_processing = False
@@ -76,10 +142,15 @@ class VideoAIApp(ctk.CTk):
         # Ẩn các thông báo lỗi ban đầu
         self.btn_fix_lib.pack_forget()
         self.lib_warning_label.pack_forget()
-        self.magick_link_label.pack_forget()
 
         # Chạy kiểm tra bất đồng bộ sau khi UI hiển thị
         self.after(500, self.async_check_at_startup)
+
+    def check_gemini_api_key(self):
+        """Kiểm tra xem GEMINI_API_KEY có được nạp thành công từ .env hay không."""
+        key = os.getenv("GEMINI_API_KEY")
+        # Kiểm tra sự tồn tại và độ dài tối thiểu (để loại trừ key rỗng)
+        return key is not None and len(key.strip()) > 10
 
     def has_playwright_chromium(self):
         """Kiểm tra file thực thi chrome.exe"""
@@ -98,22 +169,6 @@ class VideoAIApp(ctk.CTk):
             return True
         except ImportError:
             return False
-
-    def async_check_at_startup(self):
-        def task():
-            # 1. Thử tìm ImageMagick tự động
-            has_magick = self.check_imagemagick_installed()
-
-            # 2. Kiểm tra Browser
-            has_lib = self.check_playwright_lib()
-            has_browser = self.has_playwright_chromium()
-
-            if not (has_lib and has_browser and has_magick):
-                self.after(0, lambda: self.show_fix_ui(not has_magick, not has_browser))
-            else:
-                self.after(0, lambda: self.update_status("Hệ thống đã sẵn sàng"))
-
-        threading.Thread(target=task, daemon=True).start()
 
     def check_imagemagick_installed(self):
         """Kiểm tra ImageMagick trong PATH hoặc AppData"""
@@ -137,18 +192,71 @@ class VideoAIApp(ctk.CTk):
                 return True
         return False
 
-    def show_fix_ui(self, missing_magick, missing_browser):
-        msg = "⚠️ Hệ thống chưa đủ điều kiện:\n"
+    def async_check_at_startup(self):
+        def task():
+            has_magick = self.check_imagemagick_installed()
+            has_lib = self.check_playwright_lib()
+            has_browser = self.has_playwright_chromium()
+            has_gemini_key = self.check_gemini_api_key()
+
+            is_ready = has_lib and has_browser and has_magick and has_gemini_key
+
+            if not is_ready:
+                # Nếu thiếu, hiển thị giao diện FIX, TẮT nút chức năng và truyền trạng thái API Key
+                self.after(0, lambda: self.show_fix_ui(
+                    not has_magick,
+                    not has_browser,
+                    not has_gemini_key
+                ))
+                self.after(0, lambda: self.set_main_buttons_state("disabled"))
+            else:
+                # Nếu đã sẵn sàng
+                self.after(0, lambda: self.set_main_buttons_state("normal"))
+                self.after(0, lambda: self.btn_fix_lib.pack_forget())
+                self.after(0, lambda: self.lib_warning_label.pack_forget())
+                self.after(0, lambda: self.update_status("Hệ thống đã sẵn sàng"))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def show_fix_ui(self, missing_magick, missing_browser, missing_gemini_key):
+        # 1. Cập nhật Textbox
+        self.lib_warning_label.configure(state="normal")
+        self.lib_warning_label.delete("1.0", "end")
+
+        msg = "⚠️ Hệ thống chưa đủ điều kiện sử dụng:\n"
+
+        # 2. Quản lý Browser
         if missing_browser:
-            msg += "• Thiếu Browser (Nhấn nút cài đặt bên dưới)\n"
+            msg += "• Thiếu trình duyệt riêng (Nhấn nút cài đặt trình duyệt)\n"
             self.btn_fix_lib.pack(pady=5)
+            self.btn_fix_lib.configure(state="normal", text="CÀI ĐẶT TRÌNH DUYỆT")
+        else:
+            self.btn_fix_lib.pack_forget()
 
+        # 3. Quản lý ImageMagick
         if missing_magick:
-            msg += "• Thiếu ImageMagick (Bắt buộc để chèn chữ)\n"
-            self.magick_link_label.pack(pady=5)
+            download_url = "https://imagemagick.org/script/download.php#windows"
+            msg += f"• Thiếu ImageMagick (Xử lý ảnh/chữ).\nTải ImageMagick tại đây, cài xong hãy mở lại App:\n{download_url}\n"
+            msg += "\n*Lưu ý khi cài ImageMagick (RẤT QUAN TRỌNG):\n"
+            msg += "1. Phải tích chọn 'Install legacy utilities' và 'Add application directory to your system path'.\n"
+            msg += "2. Nên khởi động lại máy/ứng dụng sau khi cài đặt.\n"
 
-        self.lib_warning_label.configure(text=msg)
+        # 4. Quản lý Gemini API Key
+        if missing_gemini_key:
+            msg += "\n• Thiếu/Sai Gemini API Key (Không thể tạo nội dung AI).\n"
+            msg += "  => Vui lòng mở file .env (cùng thư mục app) và thêm GEMINI_API_KEY=YOUR_KEY vào file.\n"
+
+        # Cập nhật Textbox và Status
+        self.lib_warning_label.insert("1.0", msg)
+
+        # Phần tính toán chiều cao và pack/configure
+        num_lines = msg.count('\n') + 1
+        new_height = num_lines * 22
+        self.lib_warning_label.configure(height=new_height)
+        self.lib_warning_label.configure(state="disabled")
+
         self.lib_warning_label.pack(pady=5)
+        self.set_main_buttons_state("disabled")
         self.update_status("Yêu cầu cài đặt môi trường")
 
     def setup_ui(self):
@@ -160,17 +268,17 @@ class VideoAIApp(ctk.CTk):
         self.info_label = ctk.CTkLabel(self, text=auth_info, font=("Segoe UI", 11), text_color="#00ffcc", justify="center")
         self.info_label.pack(pady=5)
 
-        self.lib_warning_label = ctk.CTkLabel(
-            self, text="", font=("Segoe UI", 12, "bold"), text_color="#ff4d4d"
+        # Sử dụng CTkTextbox để cho phép copy đường dẫn. Chiều cao ban đầu nhỏ.
+        self.lib_warning_label = ctk.CTkTextbox(
+            self, height=1, width=600, activate_scrollbars=False,
+            font=("Segoe UI", 12, "bold"), text_color="#ff4d4d",
+            fg_color=self._fg_color,  # Dùng màu nền App
+            border_width=0,
+            wrap="word"
         )
 
-        # Link tải ImageMagick
-        self.magick_link_label = ctk.CTkTextbox(self, height=60, width=500, fg_color="transparent", text_color="#3498db")
-        self.magick_link_label.insert("1.0", "Tải ImageMagick tại đây, cài xong hãy mở lại App:\nhttps://imagemagick.org/script/download.php#windows")
-        self.magick_link_label.configure(state="disabled")
-
         self.btn_fix_lib = ctk.CTkButton(
-            self, text="CÀI ĐẶT MÔI TRƯỜNG (TRÌNH DUYỆT)", fg_color="#f39c12",
+            self, text="CÀI ĐẶT TRÌNH DUYỆT", fg_color="#f39c12",
             hover_color="#e67e22", command=self.fix_libraries
         )
 
@@ -192,7 +300,7 @@ class VideoAIApp(ctk.CTk):
 
         self.prompt_entry = ctk.CTkTextbox(self.input_frame, height=100, wrap="word")
         self.prompt_entry.insert("1.0", self.default_prompt)
-        self.prompt_entry.pack(pady=(5, 15), padx=20, fill="both")
+        self.prompt_entry.pack(pady=(5, 15), padx=10, fill="both")
 
         # --- Phần nhập Số lượng video ---
         qty_frame = ctk.CTkFrame(self.input_frame, fg_color="transparent")
@@ -233,11 +341,11 @@ class VideoAIApp(ctk.CTk):
         self.btn_upload_manual.grid(row=0, column=0, padx=5)
 
         # 2. Nút Mở thư mục INPUT (MỚI THÊM)
-        self.btn_open_input = ctk.CTkButton(secondary_btn_frame, text="THƯ MỤC INPUT", command=self.open_input_folder, height=40, width=160, font=("Segoe UI", 12, "bold"), fg_color="#8e44ad", hover_color="#9b59b6")
+        self.btn_open_input = ctk.CTkButton(secondary_btn_frame, text="THƯ MỤC VIDEO NỀN", command=self.open_input_folder, height=40, width=160, font=("Segoe UI", 12, "bold"), fg_color="#8e44ad", hover_color="#9b59b6")
         self.btn_open_input.grid(row=0, column=1, padx=5)
 
         # 3. Nút Mở thư mục OUTPUT
-        self.btn_open_folder = ctk.CTkButton(secondary_btn_frame, text="THƯ MỤC OUTPUT", command=self.open_output_folder, height=40, width=160, font=("Segoe UI", 12, "bold"), fg_color="#34495e", hover_color="#2c3e50")
+        self.btn_open_folder = ctk.CTkButton(secondary_btn_frame, text="THƯ MỤC VIDEO ĐÃ TẠO", command=self.open_output_folder, height=40, width=160, font=("Segoe UI", 12, "bold"), fg_color="#34495e", hover_color="#2c3e50")
         self.btn_open_folder.grid(row=0, column=2, padx=5)
 
         # Status & Progress
@@ -250,22 +358,60 @@ class VideoAIApp(ctk.CTk):
 
     def fix_libraries(self):
         """NÚT CÀI ĐẶT MÔI TRƯỜNG TỔNG HỢP"""
-        self.btn_fix_lib.configure(state="disabled", text="ĐANG CÀI ĐẶT...")
+        # Cập nhật trạng thái nút và UI
+        self.btn_fix_lib.configure(state="disabled", text="ĐANG XỬ LÝ...")
+        self.update_status("Bắt đầu kiểm tra/cài đặt môi trường...")
 
         def run_fix():
             try:
+                is_browser_installed = self.has_playwright_chromium()
+
                 # Cài đặt Chromium (Chỉ tải nếu chưa có)
-                if not self.has_playwright_chromium():
+                if not is_browser_installed:
                     self.update_status("Đang tải trình duyệt Chromium (~150MB)...")
-                    subprocess.check_call(["playwright", "install", "chromium"], shell=True)
+
+                    # 1. Xác định đường dẫn Playwright Driver (đã được PyInstaller đóng gói)
+                    if hasattr(sys, '_MEIPASS'):
+                        # driver.exe nằm ở thư mục gốc của PyInstaller
+                        playwright_driver_path = os.path.join(sys._MEIPASS, "playwright", "driver", "driver.exe")
+                    else:
+                        # Môi trường DEV (dùng python -m playwright)
+                        # Có thể giữ lại lệnh cũ hoặc dùng cách đơn giản hơn cho DEV
+                        playwright_driver_path = "playwright"
+
+                    if os.path.exists(playwright_driver_path):
+                        # 2. Sử dụng subprocess gọi driver.exe trực tiếp
+                        # Lệnh tương đương: playwright.driver.exe install chromium
+                        subprocess.check_call([
+                            playwright_driver_path,
+                            "install",
+                            "chromium"
+                        ], check=True)
+                        self.update_status("Tải trình duyệt Chromium thành công.")
+                    elif not hasattr(sys, '_MEIPASS'):
+                        # Nếu trong môi trường DEV nhưng không tìm thấy (lỗi hiếm)
+                        self.update_status("Thử chạy python -m playwright install chromium...")
+                        subprocess.check_call([
+                            sys.executable,
+                            "-m",
+                            "playwright",
+                            "install",
+                            "chromium"
+                        ], check=True)
+                    else:
+                        # Trường hợp driver.exe không được đóng gói (kiểm tra lại .spec)
+                         self.update_status("Lỗi: Không tìm thấy file driver của Playwright. Vui lòng kiểm tra lại cấu hình đóng gói PyInstaller.", 0)
+                         return
+
                 else:
-                    self.update_status(" Trình duyệt đã có sẵn.")
+                    self.update_status("Trình duyệt đã có sẵn. Bỏ qua cài đặt.")
 
             except Exception as e:
-                self.update_status(f"Lỗi cài đặt: {str(e)}")
+                self.after(0, lambda: self.update_status(f"Lỗi cài đặt: {str(e)}"))
                 traceback.print_exc()
             finally:
-                self.after(0, lambda: self.btn_fix_lib.configure(state="normal", text="CÀI ĐẶT MÔI TRƯỜNG"))
+                # LUÔN GỌI LẠI HÀM KIỂM TRA ĐỂ CẬP NHẬT TRẠNG THÁI GIAO DIỆN CUỐI CÙNG
+                self.after(0, self.async_check_at_startup)
 
         threading.Thread(target=run_fix, daemon=True).start()
 
@@ -310,6 +456,13 @@ class VideoAIApp(ctk.CTk):
     def open_input_folder(self):
         os.startfile(self.input_dir)
 
+    def set_main_buttons_state(self, state):
+        """Đặt trạng thái (normal/disabled) cho các nút chức năng chính."""
+        # Nút TẠO VIDEO & UPLOAD TIKTOK
+        self.btn_run.configure(state=state)
+        # Nút CHỌN & UPLOAD
+        self.btn_upload_manual.configure(state=state)
+
     def set_random_video(self):
         candidates = [os.path.join(self.input_dir, f) for f in os.listdir(self.input_dir) if f.lower().endswith((".mp4", ".mov", ".avi"))]
         if candidates:
@@ -330,13 +483,19 @@ class VideoAIApp(ctk.CTk):
         return "\n".join(lines)
 
     def generate_content_with_fallback(self, prompt):
-        if not client: raise Exception("API Key chưa cấu hình.")
+        # Sửa đổi 1: Lỗi khi API Key chưa cấu hình (client là None)
+        if not self.client:
+            error_msg = "API Key chưa cấu hình. Vui lòng mở file .env và thêm GEMINI_API_KEY=YOUR_KEY vào file."
+            raise Exception(error_msg)
         for model_name in ["gemini-2.0-flash", "gemini-2.5-flash"]:
             try:
-                response = client.models.generate_content(model=model_name, contents=prompt)
+                response = self.client.models.generate_content(model=model_name, contents=prompt)
                 return response.text.strip().replace('"', '')
-            except: continue
-        raise Exception("Không thể kết nối Gemini API.")
+            except:
+                continue
+        # Sửa đổi 2: Lỗi khi không thể kết nối sau khi thử tất cả các model
+        error_msg = "Không thể kết nối Gemini API (Key có thể sai hoặc hết hạn). Vui lòng kiểm tra lại giá trị GEMINI_API_KEY trong file .env."
+        raise Exception(error_msg)
 
     def get_pw_profile_dir(self):
         path = os.path.join(os.environ.get("APPDATA", ""), "TikTokVideoAI", "pw_profile")
@@ -466,8 +625,8 @@ class VideoAIApp(ctk.CTk):
         self.btn_stop.configure(state="disabled")
 
     def start_process(self):
-        if not GEMINI_API_KEY:
-            self.update_status("Lỗi: Thiếu API KEY.", 0)
+        if not self.GEMINI_API_KEY:
+            self.update_status("Lỗi: Thiếu API KEY. Vui lòng mở file .env và thêm GEMINI_API_KEY=YOUR_KEY vào file.", 0)
             return
 
         prompt_text = self.prompt_entry.get("1.0", "end").strip() or self.default_prompt
@@ -568,5 +727,17 @@ class VideoAIApp(ctk.CTk):
             self.btn_stop.configure(state="disabled", height=50, width=140, font=("Segoe UI", 12, "bold"), fg_color="#6b6b6b")
 
 if __name__ == "__main__":
+    # 1. KIỂM TRA CHẾ ĐỘ CÀI ĐẶT HEADLESS
+    # Nếu đối số "--headless-install" tồn tại trong lệnh gọi
+    if "--headless-install" in sys.argv:
+        # Ứng dụng này đang chạy như một tiến trình con của subprocess.
+        # Ngăn chặn khởi tạo GUI chính.
+        # Ở đây bạn có thể thêm logic để chạy lệnh Playwright nếu cần (mặc dù nó đã chạy
+        # qua sys.executable -m playwright...) nhưng tốt nhất là chỉ thoát.
+        # Playwright sẽ chạy và tải xuống trình duyệt, sau đó tiến trình này sẽ kết thúc.
+        sys.exit(0) # Thoát ngay lập tức sau khi kiểm tra.
+
+    # 2. CHẾ ĐỘ GUI BÌNH THƯỜNG
+    # Nếu không phải là chế độ headless, khởi tạo giao diện người dùng bình thường
     app = VideoAIApp()
     app.mainloop()
