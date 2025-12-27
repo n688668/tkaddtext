@@ -5,14 +5,13 @@ customtkinter
 google-genai
 python-dotenv
 
-# Xử lý Video (Lưu ý: MoviePy 2.0+ yêu cầu thêm các thư viện bổ trợ)
+# Xử lý Video
+# Cài đặt MoviePy (các dependencies như numpy, proglog, decorator, tqdm sẽ tự động được cài)
 moviepy>=2.0.0
-numpy
+
+# Xử lý Video: Thư viện bắt buộc cho MoviePy để đọc/ghi video (được khuyên dùng)
 imageio
 imageio-ffmpeg
-proglog
-decorator
-tqdm
 
 # Tự động hóa trình duyệt (TikTok Upload)
 playwright
@@ -20,4 +19,3 @@ playwright-stealth
 
 # Khác
 pillow
-py7zr

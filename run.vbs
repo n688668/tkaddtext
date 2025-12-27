@@ -1,0 +1,1 @@
+CreateObject("Wscript.Shell").Run "cmd.exe /c ""CALL .venv\Scripts\activate.bat & python main.py""", 0, True

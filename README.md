@@ -1,27 +1,23 @@
-# CMD
-```
-python -m venv .venv
-.venv\Scripts\activate.bat
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-playwright install chromium
+# INSTALL
+## Buoc 1:
+Tai va cai dat Python 3.11 tu trang web chinh thuc:
+https://www.python.org/downloads/
 
-pyinstaller TikTokVideoAI.spec
+Khi cai dat, PHAI TICH CHON: "Add Python to PATH"
 
-pyinstaller --noconfirm --onedir --windowed --add-data=".env:." --add-data="font.ttf:." --add-data="icon.ico:." --collect-all playwright --collect-all playwright_stealth --collect-all moviepy --collect-all customtkinter main.py
+## Buoc 2:
+Chay file setup.bat de cai dat moi truong
 
-pyinstaller --noconfirm --onedir --windowed ^
---add-data="config.env.template:." ^
---add-data="font.ttf:." ^
---add-data="icon.ico:." ^
---add-data="input/video_mau.mp4:input" ^  <-- THÊM DÒNG NÀY
---collect-all playwright ^
---collect-all playwright_stealth ^
---collect-all moviepy ^
---collect-all customtkinter ^
-main.py
-```
-# .env
-```
-GEMINI_API_KEY="GEMINI_API_KEY_IS_HERE"
-```
+## Buoc 3:
+Tai va cai dat IMAGEMAGICK tu trang web chinh thuc:
+https://imagemagick.org/script/download.php#windows
+
+Khi cai dat, PHAI TICH CHON: 'Install legacy utilities' và 'Add application directory to your system path'
+
+Khoi dong lai may neu can
+
+## Buoc 4:
+Chinh sua .env GEMINI_API_KEY="..."
+
+## Buoc 5:
+Chay ung dung AITiktokVideoCreator/ run.vbs hoac run.bat
