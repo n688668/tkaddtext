@@ -3,5 +3,4 @@ build/
 dist/
 input/
 output/
-pw_profile/
 .env
